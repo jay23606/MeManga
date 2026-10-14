@@ -583,19 +583,23 @@ class State:
         """Save the in-chapter resume position for a manga/chapter."""
         if chapter is None or str(chapter).strip() == "":
             return
-        self._ensure_manga_entry(manga_title)
-        entry = self._data["manga"][manga_title]
-        positions = entry.setdefault("reader_positions", {})
-        pos: Dict[str, Any] = {
-            "mode": mode,
-            "updated_at": datetime.now().isoformat(),
-        }
-        if page_index is not None:
-            pos["page_index"] = max(0, int(page_index))
-        if scroll_ratio is not None:
-            pos["scroll_ratio"] = min(1.0, max(0.0, float(scroll_ratio)))
-        positions[str(chapter)] = pos
-        self._mark_dirty()
+        # Issue #224: take the shared reentrant lock (#110) so creating the
+        # entry/positions dicts can't race a worker or the periodic
+        # flush/save; ``_ensure_manga_entry`` also requires it held.
+        with self._locked() as data:
+            self._ensure_manga_entry(manga_title)
+            entry = data["manga"][manga_title]
+            positions = entry.setdefault("reader_positions", {})
+            pos: Dict[str, Any] = {
+                "mode": mode,
+                "updated_at": datetime.now().isoformat(),
+            }
+            if page_index is not None:
+                pos["page_index"] = max(0, int(page_index))
+            if scroll_ratio is not None:
+                pos["scroll_ratio"] = min(1.0, max(0.0, float(scroll_ratio)))
+            positions[str(chapter)] = pos
+            self._mark_dirty()
 
     def get_reader_position(self, manga_title: str, chapter) -> Optional[Dict[str, Any]]:
         """Get the saved resume position, or None if never saved."""
@@ -604,11 +608,14 @@ class State:
 
     def clear_reader_position(self, manga_title: str, chapter):
         """Drop the saved resume position (e.g. chapter finished)."""
-        positions = self._data.get("manga", {}).get(manga_title, {}).get("reader_positions", {})
-        ch = str(chapter)
-        if ch in positions:
-            del positions[ch]
-            self._mark_dirty()
+        # Issue #224: check-then-delete under the shared lock so a
+        # concurrent flush/save never serializes the dict mid-removal.
+        with self._locked() as data:
+            positions = data.get("manga", {}).get(manga_title, {}).get("reader_positions", {})
+            ch = str(chapter)
+            if ch in positions:
+                del positions[ch]
+                self._mark_dirty()
 
     # ── Per-chapter read tracking (issue #18) ──────────────────────────
     # `reading_progress.last_chapter` only tracks the cursor (the most-
@@ -745,12 +752,15 @@ class State:
         the guard did not hold back, so it never advances past an unverified
         suspicious jump.
         """
-        self._ensure_manga_entry(manga_title)
-        try:
-            self._data["manga"][manga_title]["catalogue_baseline"] = float(highest)
-        except (TypeError, ValueError):
-            return
-        self._mark_dirty()
+        # Issue #224: update checks call this from background workers, so
+        # it needs the same shared lock as every other mutator (#110).
+        with self._locked() as data:
+            self._ensure_manga_entry(manga_title)
+            try:
+                data["manga"][manga_title]["catalogue_baseline"] = float(highest)
+            except (TypeError, ValueError):
+                return
+            self._mark_dirty()
 
     # ========================================================================
     # External Chapters (already read outside the app)

@@ -8,6 +8,7 @@ malformed numbers, idempotency, persistence round-trips).
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -274,6 +275,145 @@ class TestReadingProgress:
 
     def test_get_continue_reading_none_when_empty(self, state):
         assert state.get_continue_reading() is None
+
+
+class TestStateLockCoverage:
+    """Issue #224 — reader-position and catalogue-baseline mutators must
+    hold the shared state lock like every other public method."""
+
+    def test_remaining_public_mutators_use_shared_lock(self, state):
+        from contextlib import contextmanager
+
+        lock_entries = []
+        original_locked = state._locked
+
+        @contextmanager
+        def recording_locked():
+            lock_entries.append(True)
+            with original_locked() as data:
+                yield data
+
+        state._locked = recording_locked
+
+        state.set_reader_position("X", "1", mode="paged", page_index=2)
+        state.clear_reader_position("X", "1")
+        state.set_catalogue_baseline("X", 3)
+
+        assert len(lock_entries) == 3, f"expected 3 shared lock entries, got {len(lock_entries)}"
+
+    # Each mutator, its arguments, and a check for whether its write is
+    # visible in ``_data``. The pairs below rotate so every mutator is both
+    # the lock holder and the waiter.
+    _MUTATORS = {
+        "set_reader_position": (
+            ("X", "1"), {"mode": "paged", "page_index": 9},
+            lambda d: d["manga"]["X"]["reader_positions"].get("1", {}).get("page_index") == 9,
+        ),
+        "clear_reader_position": (
+            ("X", "1"), {},
+            lambda d: "1" not in d["manga"]["X"]["reader_positions"],
+        ),
+        "set_catalogue_baseline": (
+            ("X", 7), {},
+            lambda d: d["manga"]["X"]["catalogue_baseline"] == 7.0,
+        ),
+    }
+
+    @pytest.mark.parametrize("holder,waiter", [
+        ("set_reader_position", "clear_reader_position"),
+        ("clear_reader_position", "set_catalogue_baseline"),
+        ("set_catalogue_baseline", "set_reader_position"),
+    ])
+    def test_concurrent_mutators_are_serialized(self, state, holder, waiter):
+        # Regression for the interleaving the lock-entry count can't show:
+        # the holder is parked inside its critical section (in _mark_dirty)
+        # and the waiter must block on the shared lock rather than mutate
+        # alongside it. Events, not sleeps, sequence the threads.
+        state.set_reader_position("X", "1", mode="paged", page_index=2)
+        state.set_catalogue_baseline("X", 3)
+
+        holder_inside = threading.Event()
+        release_holder = threading.Event()
+        waiter_attempted = threading.Event()
+        dirty_order = []
+        threads = {}
+
+        class AttemptRecordingLock:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                if threading.current_thread() is threads.get("waiter"):
+                    waiter_attempted.set()
+                return self._inner.__enter__()
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        def parking_mark_dirty():
+            current = threading.current_thread()
+            dirty_order.append(current.name)
+            if current is threads["holder"]:
+                holder_inside.set()
+                assert release_holder.wait(timeout=5), "holder never released"
+            state._dirty = True
+
+        state._lock = AttemptRecordingLock(state._lock)
+        state._mark_dirty = parking_mark_dirty
+
+        errors = []
+
+        def run(name):
+            args, kwargs, _ = self._MUTATORS[name]
+            try:
+                getattr(state, name)(*args, **kwargs)
+            except BaseException as exc:  # surfaced in the main thread
+                errors.append(exc)
+
+        threads["holder"] = threading.Thread(target=run, args=(holder,), name="holder")
+        threads["waiter"] = threading.Thread(target=run, args=(waiter,), name="waiter")
+        holder_applied = self._MUTATORS[holder][2]
+        waiter_applied = self._MUTATORS[waiter][2]
+
+        try:
+            threads["holder"].start()
+            assert holder_inside.wait(timeout=5), "holder never reached its critical section"
+            threads["waiter"].start()
+            assert waiter_attempted.wait(timeout=5), "waiter never tried the shared lock"
+
+            # The waiter is now blocked on the lock the holder still owns,
+            # so only the holder's write may be visible.
+            assert holder_applied(state._data)
+            assert not waiter_applied(state._data)
+            assert dirty_order == ["holder"]
+        finally:
+            release_holder.set()
+            for t in threads.values():
+                if t.ident is not None:
+                    t.join(timeout=5)
+
+        assert not any(t.is_alive() for t in threads.values())
+        assert errors == []
+        assert dirty_order == ["holder", "waiter"]
+        assert waiter_applied(state._data)
+
+    @pytest.mark.parametrize("bad", [None, "", "abc", [1], {"ch": 1}, object()])
+    def test_invalid_catalogue_baseline_keeps_existing_value(self, state, bad):
+        # Regression: a non-numeric baseline is dropped without raising,
+        # leaves the trusted high-water mark intact, and doesn't dirty
+        # the state for the next flush.
+        state.set_catalogue_baseline("X", 344.0)
+        state.flush()
+        assert state._dirty is False
+
+        state.set_catalogue_baseline("X", bad)
+
+        assert state.get_catalogue_baseline("X") == 344.0
+        assert state._dirty is False
+
+    def test_invalid_catalogue_baseline_on_new_manga_records_nothing(self, state):
+        state.set_catalogue_baseline("Fresh", "not-a-number")
+        assert state.get_catalogue_baseline("Fresh") is None
 
 
 class TestReaderPosition:
