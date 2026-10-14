@@ -28,7 +28,7 @@ keyring>=24.0.0
 pywin32-ctypes>=0.2.0; sys_platform == "win32"
 
 # Stealth mode for Playwright scrapers
-playwright-stealth>=1.0.0
+playwright-stealth>=2.0,<3
 
 # SSL CA bundle -- pinned here too so build scripts can resolve it
 certifi>=2024.7.0
