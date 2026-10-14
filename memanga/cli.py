@@ -28,9 +28,10 @@ from .backup import (
     validate_backup,
 )
 from .config import Config, get_app_password, set_app_password
-from .cron import (build_cron_line, managed_lines, read_crontab,
+from .cron import (build_cron_line, build_task_command, managed_lines,
+                   read_crontab,
                    remove_managed_lines, replace_managed_line,
-                   unmanaged_memanga_lines)
+                   source_checkout_root, unmanaged_memanga_lines)
 from . import doctor
 from .state import State
 from .downloader import check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga
@@ -1273,11 +1274,6 @@ def _print_unmanaged_cron_lines(crontab):
 
 def _cmd_cron_unix(args):
     """Manage cron job (macOS/Linux)."""
-    import sys
-    project_dir = Path(__file__).resolve().parent.parent
-    python_path = project_dir / "venv" / "bin" / "python3"
-    if not python_path.exists():
-        python_path = Path(sys.executable)
 
     if args.action == "status":
         result = subprocess.run(
@@ -1315,8 +1311,12 @@ def _cmd_cron_unix(args):
         except ValueError:
             return _error("[red]Invalid time format. Use HH:MM[/red]")
 
-        cron_line = build_cron_line(minute, hour, project_dir, python_path,
-                                    config_dir=_context.config_dir)
+        # Issue #232: run the current interpreter and log to the config
+        # root, never into the package install directory.
+        cron_line = build_cron_line(
+            minute, hour, config.config_dir, sys.executable,
+            config_dir=_context.config_dir,
+            source_root=source_checkout_root(Path(__file__).resolve().parent))
 
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         existing = read_crontab(result)
@@ -1376,10 +1376,6 @@ def _cmd_cron_unix(args):
 def _cmd_cron_windows(args):
     """Manage Windows Task Scheduler task."""
     task_name = "MeManga_AutoCheck"
-    project_dir = Path(__file__).resolve().parent.parent
-    python_path = project_dir / "venv" / "Scripts" / "python.exe"
-    if not python_path.exists():
-        python_path = sys.executable
 
     if args.action == "status":
         result = subprocess.run(
@@ -1417,10 +1413,10 @@ def _cmd_cron_windows(args):
             capture_output=True, text=True,
         )
 
-        cmd = f'"{python_path}" -m memanga'
-        if _context.config_dir is not None:
-            cmd += f' --config-dir "{_context.config_dir}"'
-        cmd += " check --auto --quiet"
+        # Issue #232: the running interpreter, not a checkout-local venv.
+        cmd = build_task_command(
+            sys.executable, _context.config_dir,
+            source_root=source_checkout_root(Path(__file__).resolve().parent))
         result = subprocess.run(
             [
                 "schtasks", "/create",
@@ -2173,8 +2169,24 @@ def main():
     try:
         _main()
     except KeyboardInterrupt:
+        _flush_state_on_interrupt()
         err_console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(EXIT_INTERRUPTED)
+
+
+def _flush_state_on_interrupt():
+    """Persist state marked dirty before Ctrl-C (issue #234).
+
+    `check` only saves at the end via update_last_check(), so chapters
+    already recorded as downloaded would otherwise be lost. Best effort:
+    a failed write must not replace the interrupt with a traceback.
+    """
+    if state is None:
+        return
+    try:
+        state.flush()
+    except Exception as e:
+        err_console.print(f"[yellow]⚠️  Could not save state: {_esc(e)}[/yellow]")
 
 
 def _main():

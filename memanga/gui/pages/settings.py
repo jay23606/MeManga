@@ -8,7 +8,6 @@ import subprocess
 import sys
 import threading
 from datetime import datetime
-from pathlib import Path
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QWidget, QComboBox, QCheckBox, QRadioButton,
@@ -20,9 +19,10 @@ from .base import BasePage
 from .. import theme as T
 from ..components.toast import Toast
 from ...backup import EXPORT_VERSION, BackupVersionError, validate_backup
-from ...cron import (build_cron_line, managed_lines, read_crontab,
+from ...cron import (build_cron_line, build_task_command, managed_lines,
+                     read_crontab,
                      remove_managed_lines, replace_managed_line,
-                     unmanaged_memanga_lines)
+                     source_checkout_root, unmanaged_memanga_lines)
 
 
 class _EmailTestSignals(QObject):
@@ -1064,19 +1064,18 @@ class SettingsPage(BasePage):
             Toast(self, "Invalid time", kind="error")
             return
         hour, minute = cron_time.split(":")
-        project_dir = Path(__file__).resolve().parent.parent.parent.parent
 
         if platform.system() == "Windows":
-            self._install_cron_windows(project_dir, cron_time)
+            self._install_cron_windows(cron_time)
         else:
-            self._install_cron_unix(project_dir, hour, minute)
+            self._install_cron_unix(hour, minute)
 
-    def _install_cron_unix(self, project_dir, hour, minute):
-        python_path = sys.executable
-        venv_python = project_dir / "venv" / "bin" / "python3"
-        if venv_python.exists():
-            python_path = str(venv_python)
-        cron_cmd = build_cron_line(minute, hour, project_dir, python_path)
+    def _install_cron_unix(self, hour, minute):
+        # Issue #232: run the current interpreter and log to the config
+        # root, never into the package install directory.
+        cron_cmd = build_cron_line(minute, hour, self.app.config.config_dir,
+                                   sys.executable,
+                                   source_root=source_checkout_root())
         try:
             result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
             existing = read_crontab(result)
@@ -1104,14 +1103,12 @@ class SettingsPage(BasePage):
         except Exception as e:
             Toast(self, f"Error: {str(e)[:40]}", kind="error")
 
-    def _install_cron_windows(self, project_dir, cron_time):
+    def _install_cron_windows(self, cron_time):
         from .._subprocess import no_window_kwargs
-        python_path = sys.executable
-        venv_python = project_dir / "venv" / "Scripts" / "python.exe"
-        if venv_python.exists():
-            python_path = str(venv_python)
         task_name = "MeManga_AutoCheck"
-        cmd = f'"{python_path}" -m memanga check --auto --quiet'
+        # Issue #232: the running interpreter, not a checkout-local venv.
+        cmd = build_task_command(sys.executable,
+                                 source_root=source_checkout_root())
         try:
             # no_window_kwargs(): release exe is console=False, so any
             # naked subprocess.run() would flash a black cmd box for a

@@ -555,16 +555,26 @@ class TestSettingsPage:
     def test_install_cron_unix_quotes_paths(self, app_window, qapp,
                                             monkeypatch, tmp_path):
         """#109: cron paths with spaces must be shell-quoted so the
-        generated crontab entry survives spaced install dirs."""
+        generated crontab entry survives spaced install dirs. #232: the
+        line runs the current interpreter from the config root, not the
+        package directory or a checkout-local venv."""
         import subprocess
         import sys
+        from pathlib import Path
 
+        import memanga
         from memanga.cron import build_cron_line
         from memanga.gui.pages import settings as settings_mod
 
         page = app_window._pages["settings"]
-        project_dir = tmp_path / "My Manga"
-        project_dir.mkdir()
+        config_dir = tmp_path / "My Manga"
+        config_dir.mkdir()
+        monkeypatch.setattr(app_window.config, "config_dir", config_dir)
+        python = "/opt/pipx venvs/memanga/bin/python"
+        monkeypatch.setattr(sys, "executable", python)
+        # Installed-package branch: nothing to cd into but the config root.
+        monkeypatch.setattr(settings_mod, "source_checkout_root",
+                            lambda: None)
 
         submitted = {}
 
@@ -577,11 +587,65 @@ class TestSettingsPage:
 
         monkeypatch.setattr(settings_mod.subprocess, "run", _fake_run)
 
-        page._install_cron_unix(project_dir, "06", "30")
+        page._install_cron_unix("06", "30")
 
-        expected = build_cron_line("30", "06", project_dir, sys.executable)
+        expected = build_cron_line("30", "06", config_dir, python)
         assert expected in submitted["crontab"].splitlines()
-        assert f"'{project_dir}'" in submitted["crontab"]
+        assert f"'{config_dir}/memanga.log'" in submitted["crontab"]
+        assert f"'{python}' -m memanga" in submitted["crontab"]
+        package_parent = str(Path(memanga.__file__).resolve().parent.parent)
+        assert package_parent not in submitted["crontab"]
+
+    def test_install_cron_windows_uses_running_interpreter(
+            self, app_window, qapp, monkeypatch):
+        """#232: the scheduled task runs sys.executable, never a
+        checkout-local venv/Scripts/python.exe."""
+        import subprocess
+        import sys
+
+        from memanga.cron import build_task_command
+        from memanga.gui.pages import settings as settings_mod
+
+        python = r"C:\Program Files\Python312\python.exe"
+        monkeypatch.setattr(sys, "executable", python)
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(settings_mod.subprocess, "run", _fake_run)
+        app_window.config.set("cron.enabled", False)
+
+        app_window._pages["settings"]._install_cron_windows("06:30")
+
+        create, = [c for c in calls if c[1] == "/Create"]
+        command = create[create.index("/TR") + 1]
+        assert command == build_task_command(
+            python, source_root=settings_mod.source_checkout_root())
+        assert f'"{python}" -m memanga check --auto --quiet' in command
+        assert app_window.config.get("cron.enabled") is True
+
+    def test_install_cron_unix_source_checkout_runs_from_checkout(
+            self, app_window, qapp, monkeypatch, tmp_path):
+        """#232: a requirements-only checkout venv needs the checkout as
+        working dir; the log still goes to the config root."""
+        import shlex
+        import sys
+
+        from memanga.gui.pages import settings as settings_mod
+
+        checkout = tmp_path / "My Checkout"
+        monkeypatch.setattr(settings_mod, "source_checkout_root",
+                            lambda: checkout)
+        config_dir = app_window.config.config_dir
+        submitted = self._fake_crontab(monkeypatch, "")
+        app_window._pages["settings"]._install_cron_unix("06", "30")
+
+        line, = [l for l in submitted["crontab"].splitlines() if l]
+        command = shlex.split(line.split("* * * ", 1)[1], comments=True)
+        assert command[:4] == ["cd", str(checkout), "&&", sys.executable]
+        assert command[-3:] == [">>", str(config_dir / "memanga.log"), "2>&1"]
 
     def _fake_crontab(self, monkeypatch, existing, read_rc=0, read_err="",
                       write_rc=0):
@@ -614,12 +678,18 @@ class TestSettingsPage:
 
         from memanga.cron import build_cron_line
 
-        old = build_cron_line("15", "03", tmp_path, sys.executable)
+        config_dir = app_window.config.config_dir
+        from memanga.cron import source_checkout_root
+
+        source_root = source_checkout_root()
+        old = build_cron_line("15", "03", config_dir, sys.executable,
+                              source_root=source_root)
         submitted = self._fake_crontab(
             monkeypatch, f"{old}\n{self._USER_CRONTAB}")
-        app_window._pages["settings"]._install_cron_unix(tmp_path, "06", "30")
+        app_window._pages["settings"]._install_cron_unix("06", "30")
 
-        expected = build_cron_line("30", "06", tmp_path, sys.executable)
+        expected = build_cron_line("30", "06", config_dir, sys.executable,
+                                   source_root=source_root)
         assert submitted["crontab"] == f"{self._USER_CRONTAB}{expected}\n"
 
     def test_cron_remove_unix_only_touches_managed_line(self, app_window, qapp,
@@ -660,7 +730,7 @@ class TestSettingsPage:
         app_window.config.set("cron.enabled", False)
         submitted = self._fake_crontab(monkeypatch, "", read_rc=1,
                                        read_err="crontab: Permission denied\n")
-        app_window._pages["settings"]._install_cron_unix(tmp_path, "06", "30")
+        app_window._pages["settings"]._install_cron_unix("06", "30")
         assert submitted == {}
         assert not app_window.config.get("cron.enabled")
 

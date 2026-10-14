@@ -919,7 +919,7 @@ Remove:
 ./scripts/run.sh cron remove
 ```
 
-Output is logged to `memanga.log` in the project directory.
+Output is logged to `memanga.log` in the MeManga config directory (`~/.config/memanga/` by default, or the directory passed with `--config-dir`).
 
 ### Linux — Cron
 
@@ -1122,7 +1122,7 @@ Check if it's installed:
 Check the log file:
 
 ```bash
-cat memanga.log
+cat ~/.config/memanga/memanga.log
 ```
 
 Verify the paths in the cron entry are correct:
@@ -1201,7 +1201,7 @@ Check if it's installed:
 Check the log:
 
 ```bash
-cat memanga.log
+cat ~/.config/memanga/memanga.log
 ```
 
 Verify cron entries:

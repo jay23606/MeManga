@@ -950,18 +950,40 @@ def _capture_crontab(monkeypatch, existing=None):
     return submitted
 
 
-def _expected_cron_line(config_dir=None):
+_THIS_CHECKOUT = object()
+
+
+def _expected_cron_line(config_dir=None, runtime_dir=None,
+                        source_root=_THIS_CHECKOUT):
+    """The managed line: sys.executable logging to the config root (#232),
+    run from the source checkout this test suite imports memanga from."""
     from pathlib import Path
 
     from memanga import cli
-    from memanga.cron import build_cron_line
+    from memanga.cron import build_cron_line, source_checkout_root
 
-    project_dir = Path(cli.__file__).resolve().parent.parent
-    python_path = project_dir / "venv" / "bin" / "python3"
-    if not python_path.exists():
-        python_path = Path(sys.executable)
-    return build_cron_line(0, 6, project_dir, python_path,
-                           config_dir=config_dir)
+    if runtime_dir is None:
+        runtime_dir = config_dir or Path.home() / ".config" / "memanga"
+    if source_root is _THIS_CHECKOUT:
+        source_root = source_checkout_root(Path(cli.__file__).resolve().parent)
+    return build_cron_line(0, 6, runtime_dir, sys.executable,
+                           config_dir=config_dir, source_root=source_root)
+
+
+def _fake_package_install(monkeypatch, tmp_path):
+    """Point cli.__file__ into a read-only, spaced site-packages dir that
+    has a checkout-style venv next to it, which must never be used."""
+    from memanga import cli
+
+    site = tmp_path / "pipx venvs" / "lib" / "site-packages"
+    (site / "memanga").mkdir(parents=True)
+    for venv_python in (site / "venv" / "bin" / "python3",
+                        site / "venv" / "Scripts" / "python.exe"):
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("")
+    monkeypatch.setattr(cli, "__file__", str(site / "memanga" / "cli.py"))
+    site.chmod(0o555)
+    return site
 
 
 class TestCronCommand:
@@ -996,6 +1018,125 @@ class TestCronCommand:
 
         assert _expected_cron_line() in submitted["crontab"].splitlines()
         assert "--config-dir" not in submitted["crontab"]
+
+    def test_cron_install_outside_source_checkout(self, isolated_home,
+                                                  monkeypatch, tmp_path):
+        """#232: a pip/pipx-style install runs sys.executable from the
+        config root and logs there, never into the package directory."""
+        from memanga import cli
+
+        site = _fake_package_install(monkeypatch, tmp_path)
+        try:
+            root = tmp_path / "My Manga config"
+            python = "/opt/pipx venvs/memanga/bin/python"
+            monkeypatch.setattr(sys, "executable", python)
+            submitted = _capture_crontab(monkeypatch)
+            monkeypatch.setattr(sys, "argv", [
+                "memanga", "--config-dir", str(root),
+                "cron", "install", "--time", "06:00"])
+            cli.main()
+        finally:
+            site.chmod(0o755)
+
+        line, = [l for l in submitted["crontab"].splitlines() if l]
+        assert line == _expected_cron_line(root, source_root=None)
+        assert str(site) not in line
+        assert str(site / "venv") not in line
+        command = shlex.split(line.split("* * * ", 1)[1], comments=True)
+        assert command[:2] == ["cd", str(root)]
+        assert command[3:9] == [python, "-m", "memanga",
+                                "--config-dir", str(root), "check"]
+        assert command[-3:] == [">>", str(root / "memanga.log"), "2>&1"]
+
+    def test_cron_install_windows_uses_running_interpreter(
+            self, isolated_home, monkeypatch, tmp_path):
+        """#232: the scheduled task runs sys.executable, not a
+        checkout-local venv/Scripts/python.exe."""
+        from memanga import cli
+        from memanga.cron import build_task_command
+
+        site = _fake_package_install(monkeypatch, tmp_path)
+        root = tmp_path / "My Manga config"
+        python = r"C:\Program Files\Python312\python.exe"
+        monkeypatch.setattr(sys, "executable", python)
+        calls = []
+
+        def _run(argv, *a, **k):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(cli.subprocess, "run", _run)
+        monkeypatch.setattr(sys, "argv", [
+            "memanga", "--config-dir", str(root),
+            "cron", "install", "--time", "06:00"])
+        try:
+            cli.main()
+        finally:
+            site.chmod(0o755)
+
+        create, = [c for c in calls if c[1] == "/create"]
+        command = create[create.index("/tr") + 1]
+        assert command == build_task_command(python, root)
+        assert command == (f'"{python}" -m memanga --config-dir "{root}" '
+                           "check --auto --quiet")
+
+    def test_cron_install_source_checkout_runs_from_checkout(
+            self, isolated_home, monkeypatch, tmp_path):
+        """#232: a requirements-only checkout venv can only import memanga
+        from the checkout, so the job cd's there but logs to the config
+        root."""
+        from memanga import cli
+
+        checkout = tmp_path / "My Checkout"
+        (checkout / "memanga").mkdir(parents=True)
+        monkeypatch.setattr(cli, "__file__",
+                            str(checkout / "memanga" / "cli.py"))
+        root = tmp_path / "My Manga config"
+        python = str(checkout / "venv" / "bin" / "python3")
+        monkeypatch.setattr(sys, "executable", python)
+        submitted = _capture_crontab(monkeypatch)
+        monkeypatch.setattr(sys, "argv", [
+            "memanga", "--config-dir", str(root),
+            "cron", "install", "--time", "06:00"])
+        cli.main()
+
+        line, = [l for l in submitted["crontab"].splitlines() if l]
+        assert line == _expected_cron_line(root, source_root=checkout)
+        command = shlex.split(line.split("* * * ", 1)[1], comments=True)
+        assert command[:3] == ["cd", str(checkout), "&&"]
+        assert command[3:9] == [python, "-m", "memanga",
+                                "--config-dir", str(root), "check"]
+        assert command[-3:] == [">>", str(root / "memanga.log"), "2>&1"]
+
+    def test_cron_install_windows_source_checkout_changes_dir(
+            self, isolated_home, monkeypatch, tmp_path):
+        """#232: Task Scheduler has no working dir, so a checkout task
+        cd's into the checkout before running -m memanga."""
+        from memanga import cli
+
+        checkout = tmp_path / "My Checkout"
+        (checkout / "memanga").mkdir(parents=True)
+        monkeypatch.setattr(cli, "__file__",
+                            str(checkout / "memanga" / "cli.py"))
+        python = r"C:\My Checkout\venv\Scripts\python.exe"
+        monkeypatch.setattr(sys, "executable", python)
+        calls = []
+
+        def _run(argv, *a, **k):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(cli.subprocess, "run", _run)
+        monkeypatch.setattr(sys, "argv",
+                            ["memanga", "cron", "install", "--time", "06:00"])
+        cli.main()
+
+        create, = [c for c in calls if c[1] == "/create"]
+        command = create[create.index("/tr") + 1]
+        assert command == (f'cmd /d /c "cd /d "{checkout}" && "{python}" '
+                           '-m memanga check --auto --quiet"')
 
 
 # Issue #231: install/remove/status only touch the marked line.
@@ -1873,6 +2014,36 @@ class TestExitCodes:
         assert "Interrupted" in captured.err
         assert captured.out == ""
 
+    def test_console_script_targets_wrapped_main(self):
+        # Issue #234: the installed `memanga` script must enter through
+        # main(), which owns the Ctrl-C handling, not _main().
+        # Plain-text parse: tomllib is stdlib only on 3.11+ and we support 3.10.
+        import re
+        from pathlib import Path
+
+        pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        section = re.search(r"^\[project\.scripts\]\n(.*?)(?=^\[|\Z)",
+                            pyproject.read_text(), re.M | re.S)
+        assert section is not None
+        assert re.search(r'^memanga\s*=\s*"memanga\.cli:main"\s*$',
+                         section.group(1), re.M)
+
+    def test_python_m_memanga_interrupt_exits_130(self, monkeypatch, capsys):
+        import runpy
+        from memanga import cli
+
+        def _interrupt():
+            raise KeyboardInterrupt
+        monkeypatch.setattr(cli, "_main", _interrupt)
+        monkeypatch.setattr(cli, "state", None)
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_module("memanga", run_name="__main__")
+        assert exc.value.code == 130
+        captured = capsys.readouterr()
+        assert "Interrupted" in captured.err
+        assert "Traceback" not in captured.err
+        assert captured.out == ""
+
     def test_search_json_error_keeps_stdout_clean(self, run_cli, capsys):
         rc = run_cli("search", "Blue Lock", "--json",
                      "--source", "not-a-real-source.example")
@@ -2017,6 +2188,46 @@ class TestCheckExitCodes:
         captured = capsys.readouterr()
         assert "0/1 chapters recovered" in captured.out
         assert "No source to retry Chapter 7 of Alpha" in captured.err
+
+    def _interrupt_on_beta(self, monkeypatch):
+        from memanga import cli
+        from memanga.scrapers.base import Chapter
+
+        def _check(manga, *a, **k):
+            if manga["title"] == "Beta":
+                raise KeyboardInterrupt
+            return [Chapter(number="1")]
+        monkeypatch.setattr(cli, "check_for_updates", _check)
+
+    def test_interrupted_check_keeps_completed_chapters(
+            self, run_cli, seeded, fake_download, isolated_home,
+            monkeypatch, capsys):
+        # Issue #234: Alpha's chapter is only marked dirty; Ctrl-C before
+        # the end-of-check save must still persist it.
+        from memanga.state import State
+
+        self._interrupt_on_beta(monkeypatch)
+        capsys.readouterr()
+        assert run_cli("check", "--auto") == 130
+        assert "Interrupted" in capsys.readouterr().err
+
+        on_disk = State(isolated_home / ".config" / "memanga")
+        assert on_disk.is_chapter_downloaded("Alpha", "1")
+        assert on_disk.get("last_check") is None
+
+    def test_interrupt_flush_failure_still_exits_130(
+            self, run_cli, seeded, fake_download, monkeypatch, capsys):
+        from memanga.state import State
+
+        def _broken_flush(self):
+            raise OSError("disk full")
+        monkeypatch.setattr(State, "flush", _broken_flush)
+        self._interrupt_on_beta(monkeypatch)
+        capsys.readouterr()
+        assert run_cli("check", "--auto") == 130
+        err = capsys.readouterr().err
+        assert "Could not save state: disk full" in err
+        assert "Interrupted" in err
 
 
 class TestTargetMatching:
