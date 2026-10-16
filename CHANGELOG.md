@@ -22,8 +22,29 @@ All notable changes are recorded here. Format loosely follows
 - #250 `list`, `status` and `failed` accept `--json` for scripts. The
   output is plain JSON with a `schema_version` field, and
   `status --json` never includes the app password.
+- #351 `memanga check --download` is the explicit way to download new
+  chapters without prompting. `-a`/`--auto` and `-y`/`--yes` are aliases
+  and keep working without warnings, so existing cron lines are
+  unchanged. `check --help`, the README and the guide describe the
+  check-only (`--dry-run`), download and ask modes and the exit codes,
+  including exit 0 for no new chapters and for a withheld suspicious
+  batch.
+
+### Changed
+- #351 `memanga check --quiet` on a terminal without `--download` now
+  skips new chapters and exits 1 with a hint, as it already did without a
+  terminal. It used to skip them silently and exit 0. `--quiet` never
+  prompts and never gives permission to download.
 
 ### Fixed
+- #351 `memanga check --dry-run` no longer changes state. It used to
+  record a check (last-check time and a history entry counting listed
+  chapters as downloaded), start or clear backup-delay clocks, advance the
+  catalogue baseline, and record or clear suspicious batches. In
+  particular, `--dry-run --force-suspicious`, `--dry-run --all` or
+  `--dry-run --from N` could accept a held suspicious batch so the next
+  scheduled check downloaded it. A forced preview now only shows what
+  accepting the batch would download.
 - #231 `memanga cron install` and `cron remove` (and the GUI Settings
   buttons) only change the crontab line they own, now marked with a
   trailing `# memanga-managed` comment. Other lines, comments and blank

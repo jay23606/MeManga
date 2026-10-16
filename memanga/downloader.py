@@ -185,6 +185,9 @@ def check_for_updates(
     from_chapter: Optional[float] = None,
     return_all: bool = False,
     force_suspicious: bool = False,
+    *,
+    dry_run: bool = False,
+    report: Optional[Dict[str, Any]] = None,
 ):
     """
     Check if a manga has new chapters, with backup source support.
@@ -220,6 +223,17 @@ def check_for_updates(
             the original CLI signature.
         force_suspicious: Accept a batch even if it looks suspicious
             (``memanga check --force-suspicious``).
+        dry_run: Preview only (``memanga check --dry-run``). Selects the
+            same chapters a real check would, but writes nothing to
+            ``state``: no pending-backup clock is started or cleared, no
+            suspicious record is set or cleared, no notification is added
+            and the catalogue baseline is not advanced. A forced or
+            ``from_chapter`` preview therefore can't accept a held batch.
+        report: Optional dict filled with what this call decided, so a
+            caller can describe it without reading persisted state (which a
+            dry run leaves untouched). Keys: ``withheld`` (the suspicious
+            batch record withheld by this call, or None) and ``forced``
+            (chapters included only because of ``force_suspicious``).
 
     Returns:
         ``List[ChapterWithSource]`` (default) or
@@ -228,6 +242,10 @@ def check_for_updates(
     """
     title = manga["title"]
     sources = _get_sources_from_manga(manga)
+    if report is None:
+        report = {}
+    report["withheld"] = None
+    report["forced"] = 0
     fallback_delay_days = manga.get("fallback_delay_days", DEFAULT_FALLBACK_DELAY_DAYS)
     
     if not sources:
@@ -392,7 +410,8 @@ def check_for_updates(
                 confirmed = sum(1 for n in suspect_numbers if n in backup_all_numbers)
                 if backup_sources_checked and confirmed / len(suspect_numbers) >= 0.5:
                     # Backup largely agrees with the primary, so accept the batch.
-                    state.clear_suspicious_batch(title)
+                    if not dry_run:
+                        state.clear_suspicious_batch(title)
                 else:
                     if backup_sources_checked:
                         backup_status = (
@@ -400,7 +419,7 @@ def check_for_updates(
                         )
                     else:
                         backup_status = "no backup source available to verify"
-                    state.set_suspicious_batch(title, {
+                    record = {
                         "detected_at": datetime.now().isoformat(),
                         "chapters": [ch.number for ch in suspect],
                         "count": len(suspect),
@@ -409,13 +428,16 @@ def check_for_updates(
                         "score": suspicion.score,
                         "reasons": suspicion.reasons,
                         "backup_status": backup_status,
-                    })
-                    state.add_notification(
-                        "warn",
-                        f"Suspicious chapter batch for '{title}': "
-                        f"{len(suspect)} chapter(s) up to {max(suspect_numbers):g} "
-                        f"({backup_status}). Skipped auto-delivery.",
-                    )
+                    }
+                    report["withheld"] = record
+                    if not dry_run:
+                        state.set_suspicious_batch(title, record)
+                        state.add_notification(
+                            "warn",
+                            f"Suspicious chapter batch for '{title}': "
+                            f"{len(suspect)} chapter(s) up to {max(suspect_numbers):g} "
+                            f"({backup_status}). Skipped auto-delivery.",
+                        )
                     # Withhold only the suspicious newly-appeared chapters;
                     # the known backlog stays downloadable. Don't advance the
                     # trusted baseline past an unverified jump.
@@ -423,15 +445,18 @@ def check_for_updates(
                         primary_chapters.pop(num, None)
                     catalogue_trusted = False
             else:
+                if suspicion is not None and suspicion.suspicious:
+                    report["forced"] = len(scored)
                 # Batch is normal, forced, or backup-confirmed. Drop any
                 # stale suspicious record so warnings don't linger.
-                state.clear_suspicious_batch(title)
+                if not dry_run:
+                    state.clear_suspicious_batch(title)
 
         # Advance the trusted catalogue high-water mark unless we just held
         # back an unverified jump. Recording it even when the guard didn't
         # run (fresh manga, explicit from_chapter) gives later checks a
         # baseline so a big existing backlog is never re-scored as a jump.
-        if catalogue_trusted and (primary_high > baseline or bootstrapped_manual_baseline):
+        if not dry_run and catalogue_trusted and (primary_high > baseline or bootstrapped_manual_baseline):
             set_catalogue_baseline = getattr(state, "set_catalogue_baseline", None)
             if callable(set_catalogue_baseline):
                 set_catalogue_baseline(title, primary_high)
@@ -443,7 +468,8 @@ def check_for_updates(
             ChapterWithSource(ch, primary_src["source"], primary_src["url"], is_backup=False)
         )
         # Clear any pending backup for this chapter (primary caught up)
-        state.clear_pending_backup(title, ch_num)
+        if not dry_run:
+            state.clear_pending_backup(title, ch_num)
     
     # Process backup chapters
     now = datetime.now()
@@ -466,7 +492,7 @@ def check_for_updates(
                 )
                 # Note: We'll clear pending_backup after successful download
             # else: still waiting, do nothing
-        else:
+        elif not dry_run:
             # First time seeing this on backup, start waiting
             state.set_pending_backup(title, ch_num, backup_source, ch.url)
 
@@ -1475,6 +1501,49 @@ def rename_manga_downloads(download_dir, old_title: str, new_title: str) -> bool
         pass
 
     return moved
+
+
+class UnsafeDownloadPathError(Exception):
+    """A manga's download folder can't be deleted safely."""
+
+
+def find_manga_downloads(download_dir, title: str) -> Optional[Path]:
+    """Return the manga's managed download folder, or ``None`` if absent.
+
+    Only ``<download_dir>/<sanitized title>`` is considered — the folder
+    ``download_chapter`` writes to. Raises ``UnsafeDownloadPathError``
+    when that entry is a symlink, not a directory, or resolves anywhere
+    but directly inside the download root (issue #349).
+    """
+    root = Path(download_dir).expanduser()
+    if not root.is_dir():
+        return None
+    name = _sanitize_filename(title)
+    if name in ("", ".", "..") or "/" in name or "\\" in name:
+        raise UnsafeDownloadPathError(f"unusable folder name for {title!r}")
+    target = root / name
+    if not os.path.lexists(target):
+        return None
+    if target.is_symlink():
+        raise UnsafeDownloadPathError(f"{target} is a symlink")
+    if not target.is_dir():
+        raise UnsafeDownloadPathError(f"{target} is not a directory")
+    if target.resolve(strict=True).parent != root.resolve(strict=True):
+        raise UnsafeDownloadPathError(f"{target} is outside {root}")
+    return target
+
+
+def delete_manga_downloads(download_dir, title: str) -> Optional[Path]:
+    """Delete the manga's managed download folder; return what was removed.
+
+    Returns ``None`` when there is nothing to delete. Symlinks inside the
+    folder are unlinked, never followed.
+    """
+    target = find_manga_downloads(download_dir, title)
+    if target is None:
+        return None
+    shutil.rmtree(target)
+    return target
 
 
 def _format_chapter_number(chapter_num: str) -> str:

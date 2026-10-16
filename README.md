@@ -268,7 +268,7 @@ Use the included `compose.yaml` for repeated commands:
 ```bash
 docker compose build
 docker compose run --rm memanga list
-docker compose run --rm memanga check --auto
+docker compose run --rm memanga check --download
 ```
 
 For a host cron job, run Compose from the repository directory:
@@ -284,14 +284,14 @@ For a host cron job, run Compose from the repository directory:
 | `list` (`ls`) [--json] | Show every tracked manga with status + chapter counts |
 | `add` | Add a manga; supports `-t TITLE -u URL [-b BACKUP_URL]` or `-i` interactive |
 | `set TITLE STATUS` | `reading` / `on-hold` / `dropped` / `completed` |
-| `remove TITLE` (`rm`) [--yes] [--purge] | Drop a manga from tracking; `--purge` also deletes its download history |
-| `update TITLE …` | Edit URL, backup source, or rename |
-| `check [TITLE] [--from N] [--auto] [--safe]` | Look for new chapters, optionally download them |
+| `remove TITLE` (`rm`) [--yes] [--purge-history] [--keep-files \| --delete-files] | Drop a manga from tracking. History and files are kept unless `--purge-history` / `--delete-files` is given; `--yes` only skips the confirmation |
+| `update TITLE …` (`edit`) | Edit URL, backup (`--backup` / `--no-backup`), fallback days, title, status, mode or Kindle toggle; only the given fields change |
+| `check [-t TITLE] [--dry-run \| --download] [--from N] [--safe]` | Look for new chapters. `--dry-run` only lists them; `--download` (aliases `--auto`, `--yes`) downloads without prompting; otherwise it asks on a terminal and downloads nothing without one |
 | `failed [--retry] [--clear] [--json]` | List / re-attempt / clear partially-failed downloads |
 | `status [--json]` | Show config dir, download dir, manga count, last check time |
 | `doctor [--json] [--check NAME] [--smtp] [--launch-browsers]` | Diagnose install, paths, browsers, email, keyring, scheduler and source health |
 | `config` | Interactive settings editor |
-| `cron install [--time 06:00]` | Schedule a daily `check --auto` job |
+| `cron install [--time 06:00]` | Schedule a daily `check --auto --quiet` job (`--auto` is an alias of `--download`) |
 | `cron status` / `cron remove` | Inspect / uninstall the cron job |
 | `sources` | List all 319 supported domains, marking which ones are healthy |
 | `export FILE` / `import FILE` | Back up or restore your library + state as JSON |
@@ -319,11 +319,13 @@ primary to catch up.
 ### Backfill an entire series from chapter 1
 
 ```bash
-python -m memanga check -t "Blue Lock" --from 1 --auto --safe
+python -m memanga check -t "Blue Lock" --from 1 --download --safe
 ```
 
 `--safe` restarts the browser every 3 chapters to keep memory usage
-flat across long bulk runs.
+flat across long bulk runs. Swap `--download` for `--dry-run` first to
+see which chapters it would fetch without downloading or changing
+anything.
 
 ### Schedule daily checks
 

@@ -308,6 +308,215 @@ class TestCheckForUpdatesGuard:
 
 
 # -------------------------------------------------------------------------
+# #351: check_for_updates(dry_run=True) previews without writing state
+# -------------------------------------------------------------------------
+
+
+def _state_snapshot(state):
+    """Everything State would persist, as a comparable copy."""
+    import copy
+    return copy.deepcopy(state._data)
+
+
+def _numbers(chapters):
+    return [c.number for c in chapters]
+
+
+class TestCheckForUpdatesDryRun:
+    def test_new_suspicious_batch_is_reported_not_recorded(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        state.set_catalogue_baseline("Tomodachi", 52.3)
+        state.save()
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        before = _state_snapshot(state)
+        on_disk = state.state_path.read_bytes()
+
+        report = {}
+        new = check_for_updates(SINGLE_SOURCE_MANGA, state, dry_run=True, report=report)
+
+        assert new == []
+        assert report["withheld"]["count"] == len(MANGAFIRE_BOGUS_BATCH)
+        assert report["forced"] == 0
+        assert _state_snapshot(state) == before
+        assert state.state_path.read_bytes() == on_disk
+        assert state.get_suspicious_batch("Tomodachi") is None
+        assert state.get_notifications() == []
+
+    def test_forced_preview_keeps_batch_held(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        state.set_catalogue_baseline("Tomodachi", 52.3)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        # A real check holds the batch.
+        assert check_for_updates(SINGLE_SOURCE_MANGA, state) == []
+        record = state.get_suspicious_batch("Tomodachi")
+        assert record is not None
+        before = _state_snapshot(state)
+
+        report = {}
+        new = check_for_updates(
+            SINGLE_SOURCE_MANGA, state, force_suspicious=True,
+            dry_run=True, report=report,
+        )
+
+        # The preview shows what accepting would fetch...
+        assert len(new) == len(MANGAFIRE_BOGUS_BATCH)
+        assert report["forced"] == len(MANGAFIRE_BOGUS_BATCH)
+        assert report["withheld"] is None
+        # ...but accepts nothing.
+        assert _state_snapshot(state) == before
+        assert state.get_catalogue_baseline("Tomodachi") == pytest.approx(52.3)
+        # The next unforced real check still withholds the batch.
+        assert check_for_updates(SINGLE_SOURCE_MANGA, state) == []
+        assert state.get_suspicious_batch("Tomodachi") is not None
+
+    @pytest.mark.parametrize("from_chapter", [0, 1])
+    def test_backfill_preview_does_not_advance_baseline(self, state, monkeypatch,
+                                                        from_chapter):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        state.set_catalogue_baseline("Tomodachi", 52.3)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        assert check_for_updates(SINGLE_SOURCE_MANGA, state) == []
+        before = _state_snapshot(state)
+
+        new = check_for_updates(
+            SINGLE_SOURCE_MANGA, state, from_chapter=from_chapter, dry_run=True,
+        )
+
+        assert len(new) == len(MANGAFIRE_BOGUS_BATCH) + 1
+        assert _state_snapshot(state) == before
+        assert state.get_catalogue_baseline("Tomodachi") == pytest.approx(52.3)
+        assert check_for_updates(SINGLE_SOURCE_MANGA, state) == []
+
+    def test_real_backfill_still_advances_baseline(self, state, monkeypatch):
+        """Characterizes the non-preview path the dry run must not take."""
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        state.set_catalogue_baseline("Tomodachi", 52.3)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        check_for_updates(SINGLE_SOURCE_MANGA, state, from_chapter=0)
+        assert state.get_catalogue_baseline("Tomodachi") == pytest.approx(148.0)
+
+    def test_stale_record_is_not_cleared_or_reported(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        assert check_for_updates(SINGLE_SOURCE_MANGA, state) == []
+        # The source fixes its list.
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3, 53.0]),
+        })
+
+        report = {}
+        new = check_for_updates(SINGLE_SOURCE_MANGA, state, dry_run=True, report=report)
+
+        assert _numbers(new) == ["53"]
+        assert report["withheld"] is None
+        # Only a real check clears the record.
+        assert state.get_suspicious_batch("Tomodachi") is not None
+
+    def test_backup_first_seen_does_not_start_clock(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "10")
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning(range(1, 11)),
+            "backup.test": _scraper_returning(range(1, 12)),
+        })
+
+        assert check_for_updates(MULTI_SOURCE_MANGA, state, dry_run=True) == []
+        assert state.get_pending_backup("Tomodachi", "11") is None
+
+        # The first real check starts the clock at its own time.
+        assert check_for_updates(MULTI_SOURCE_MANGA, state) == []
+        pending = state.get_pending_backup("Tomodachi", "11")
+        assert pending is not None
+        assert datetime.fromisoformat(pending["first_seen"]) > datetime.now() - timedelta(minutes=1)
+
+    def test_due_backup_is_previewed_and_kept_pending(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "10")
+        state.set_pending_backup("Tomodachi", "11", "backup.test", "u/11")
+        state._data["manga"]["Tomodachi"]["pending_backup"]["11"]["first_seen"] = (
+            datetime.now() - timedelta(days=5)
+        ).isoformat()
+        state.save()
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning(range(1, 11)),
+            "backup.test": _scraper_returning(range(1, 12)),
+        })
+        before = _state_snapshot(state)
+
+        preview = check_for_updates(MULTI_SOURCE_MANGA, state, dry_run=True)
+        real = check_for_updates(MULTI_SOURCE_MANGA, state)
+
+        assert _numbers(preview) == _numbers(real) == ["11"]
+        assert preview[0].is_backup
+        assert before["manga"]["Tomodachi"]["pending_backup"] == \
+            state._data["manga"]["Tomodachi"]["pending_backup"]
+
+    def test_primary_catch_up_does_not_clear_pending(self, state, monkeypatch):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "10")
+        state.set_pending_backup("Tomodachi", "11", "backup.test", "u/11")
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning(range(1, 12)),
+            "backup.test": _scraper_returning(range(1, 12)),
+        })
+
+        new = check_for_updates(MULTI_SOURCE_MANGA, state, dry_run=True)
+        assert _numbers(new) == ["11"]
+        assert state.get_pending_backup("Tomodachi", "11") is not None
+
+        check_for_updates(MULTI_SOURCE_MANGA, state)
+        assert state.get_pending_backup("Tomodachi", "11") is None
+
+    @pytest.mark.parametrize("primary,backup,kwargs", [
+        ([52.0, 52.3, 53.0, 54.0], None, {}),
+        ([52.3] + MANGAFIRE_BOGUS_BATCH, None, {}),
+        ([52.3] + MANGAFIRE_BOGUS_BATCH, None, {"force_suspicious": True}),
+        ([52.3] + MANGAFIRE_BOGUS_BATCH, None, {"from_chapter": 100}),
+        ([52.3] + MANGAFIRE_BOGUS_BATCH, [52.3] + MANGAFIRE_BOGUS_BATCH, {}),
+        ([52.3] + MANGAFIRE_BOGUS_BATCH, [51.0, 52.3], {}),
+    ])
+    def test_preview_selects_what_a_real_check_would(self, state, monkeypatch,
+                                                     primary, backup, kwargs):
+        from memanga.downloader import check_for_updates
+
+        state.set_last_chapter("Tomodachi", "52.3")
+        state.set_catalogue_baseline("Tomodachi", 52.3)
+        scrapers = {"primary.test": _scraper_returning(primary)}
+        manga = SINGLE_SOURCE_MANGA
+        if backup is not None:
+            scrapers["backup.test"] = _scraper_returning(backup)
+            manga = MULTI_SOURCE_MANGA
+        _patch_scrapers(monkeypatch, scrapers)
+
+        preview = check_for_updates(manga, state, dry_run=True, **kwargs)
+        real = check_for_updates(manga, state, **kwargs)
+        assert _numbers(preview) == _numbers(real)
+
+
+# -------------------------------------------------------------------------
 # #102: existing catalogue backlog must not read as a suspicious jump
 # -------------------------------------------------------------------------
 
@@ -550,7 +759,8 @@ class TestCliForceSuspicious:
 
         seen = {}
 
-        def _fake_check(manga, state, from_chapter=None, force_suspicious=False):
+        def _fake_check(manga, state, from_chapter=None, force_suspicious=False,
+                        **kwargs):
             seen["force_suspicious"] = force_suspicious
             return []
 
@@ -570,10 +780,130 @@ class TestCliForceSuspicious:
             cli, "check_for_updates",
             lambda manga, state, from_chapter=None, force_suspicious=False: [],
         )
-        cli.cmd_check(self._check_args())
+        cli.cmd_check(self._check_args(dry_run=False))
 
         # Withheld delivery is a warning, so it goes to stderr (#239).
         err = capsys.readouterr().err
         assert "Suspicious chapter batch detected" in err
         assert "--force-suspicious" in err
         assert "Skipped auto-delivery" in err
+
+    # #351: previews run the real check_for_updates, so these exercise the
+    # state it would otherwise write.
+
+    @pytest.fixture
+    def downloads(self, cli, monkeypatch, tmp_path):
+        got = []
+
+        def _download(manga, ch, *a, **k):
+            got.append(ch.number)
+            path = tmp_path / f"{ch.number}.pdf"
+            path.write_bytes(b"pdf")
+            return path
+
+        monkeypatch.setattr(cli, "download_chapter", _download)
+        monkeypatch.setattr(cli, "_find_chapter_on_backup", lambda *a, **k: None)
+        return got
+
+    @staticmethod
+    def _held_batch(cli, monkeypatch):
+        """Track Tomodachi at 52.3; a real check holds the bogus batch."""
+        cli.config.set("manga", [dict(SINGLE_SOURCE_MANGA)])
+        cli.state.set_last_chapter("Tomodachi", "52.3")
+        cli.state.set_catalogue_baseline("Tomodachi", 52.3)
+        cli.state.save()
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+        assert cli.cmd_check(TestCliForceSuspicious._check_args(dry_run=False)) is None
+        assert cli.state.get_suspicious_batch("Tomodachi") is not None
+
+    @pytest.mark.parametrize("preview", [
+        dict(force_suspicious=True),
+        dict(all=True),
+        dict(from_chapter=1.0),
+        dict(force_suspicious=True, all=True),
+    ])
+    def test_preview_never_accepts_held_batch(self, cli, monkeypatch, capsys,
+                                              downloads, preview):
+        import copy
+        self._held_batch(cli, monkeypatch)
+        before = copy.deepcopy(cli.state._data)
+        on_disk = cli.state.state_path.read_bytes()
+        capsys.readouterr()
+
+        assert cli.cmd_check(self._check_args(dry_run=True, **preview)) is None
+        out = capsys.readouterr().out
+        assert "[DRY RUN] Chapter 148" in out
+        assert downloads == []
+        assert cli.state._data == before
+        assert cli.state.state_path.read_bytes() == on_disk
+
+        # The next scheduled run still withholds the batch.
+        assert cli.cmd_check(self._check_args(dry_run=False)) is None
+        assert downloads == []
+        err = capsys.readouterr().err
+        assert "Suspicious chapter batch detected" in err
+        assert cli.state.get_catalogue_baseline("Tomodachi") == pytest.approx(52.3)
+
+    def test_forced_preview_does_not_claim_batch_is_withheld(
+            self, cli, monkeypatch, capsys, downloads):
+        self._held_batch(cli, monkeypatch)
+        capsys.readouterr()
+
+        cli.cmd_check(self._check_args(dry_run=True, force_suspicious=True))
+        err = " ".join(capsys.readouterr().err.split())
+        assert "Suspicious chapter batch detected" not in err
+        assert "--force-suspicious: includes 64 chapter(s)" in err
+
+    def test_preview_reports_batch_it_would_withhold(self, cli, monkeypatch,
+                                                     capsys, downloads):
+        cli.config.set("manga", [dict(SINGLE_SOURCE_MANGA)])
+        cli.state.set_last_chapter("Tomodachi", "52.3")
+        cli.state.set_catalogue_baseline("Tomodachi", 52.3)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+
+        # Withheld-only outcome is a warning, not a failure: exit 0.
+        assert cli.cmd_check(self._check_args(dry_run=True)) is None
+        err = " ".join(capsys.readouterr().err.split())
+        assert "Suspicious chapter batch detected: 64 chapter(s)" in err
+        assert "A download run would skip these chapters" in err
+        assert "--download --force-suspicious" in err
+        assert cli.state.get_suspicious_batch("Tomodachi") is None
+        assert cli.state.get_notifications() == []
+
+    def test_preview_ignores_stale_record(self, cli, monkeypatch, capsys,
+                                          downloads):
+        self._held_batch(cli, monkeypatch)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.3, 53.0]),
+        })
+        capsys.readouterr()
+
+        cli.cmd_check(self._check_args(dry_run=True))
+        captured = capsys.readouterr()
+        assert "[DRY RUN] Chapter 53" in captured.out
+        assert "Suspicious chapter batch" not in captured.err
+
+    def test_withheld_batch_exits_0_with_download(self, cli, monkeypatch,
+                                                  capsys, downloads):
+        cli.config.set("manga", [dict(SINGLE_SOURCE_MANGA)])
+        cli.state.set_last_chapter("Tomodachi", "52.3")
+        cli.state.set_catalogue_baseline("Tomodachi", 52.3)
+        _patch_scrapers(monkeypatch, {
+            "primary.test": _scraper_returning([52.0, 52.3] + MANGAFIRE_BOGUS_BATCH),
+        })
+
+        assert cli.cmd_check(self._check_args(dry_run=False)) is None
+        assert downloads == []
+        assert "Skipped auto-delivery" in capsys.readouterr().err
+
+    def test_forced_download_accepts_batch(self, cli, monkeypatch, downloads):
+        self._held_batch(cli, monkeypatch)
+        assert cli.cmd_check(
+            self._check_args(dry_run=False, force_suspicious=True)) is None
+        assert len(downloads) == len(MANGAFIRE_BOGUS_BATCH)
+        assert cli.state.get_suspicious_batch("Tomodachi") is None
+        assert cli.state.get_catalogue_baseline("Tomodachi") == pytest.approx(148.0)

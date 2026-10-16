@@ -359,7 +359,7 @@ MeManga will prompt you step by step:
 ```
 ➕ Add New Manga
 
-Supported sources: mangadex.org, weebcentral.com, mangafire.to, ...
+N supported sources; run `memanga sources` to see them.
 
 📖 Manga title: One Piece
 🔗 Primary source URL: https://tcbonepiecechapters.com/mangas/5/one-piece
@@ -382,6 +382,31 @@ Add with a backup source:
 run add -t "Solo Leveling" -u "https://mangafire.to/manga/solo-leveling.xxx" -b "https://mangadex.org/title/uuid-here"
 ```
 
+Set the per-manga fields the desktop app manages while adding:
+
+```bash
+run add -t "Blue Lock" -u "https://mangadex.org/title/uuid-here" --status on-hold --mode manual --no-kindle
+```
+
+| Flag | Values | Default when omitted |
+|------|--------|----------------------|
+| `--status` | `reading`, `on-hold`, `dropped`, `completed` | `reading` |
+| `--mode` | `auto`, `manual` | `auto` |
+| `--kindle` / `--no-kindle` | per-manga Kindle toggle on or off | on |
+
+`--kindle` and `--no-kindle` cannot be combined. `--mode` and the Kindle
+toggle are the same per-manga settings shown on the desktop app's manga page,
+and both are honored by the desktop app (the Kindle toggle only matters when
+email delivery is enabled). CLI `check --download` and cron currently still
+process every `reading` manga regardless of these per-manga mode and Kindle
+settings. Omitted flags are not written to `config.yaml`, so the defaults
+above apply. Invalid values are rejected before any config is saved. These
+flags also work with `add -i`, which does not ask for them. Output format
+stays global (`config`, or `check --format`); there is no per-manga format.
+
+If a URL's site is not recognized, `add` warns and points you to
+`run sources` for the list of supported sites.
+
 ### View your tracked manga
 
 ```bash
@@ -391,12 +416,16 @@ run list
 Output:
 
 ```
-┌───┬───────────────┬─────────┬────────────────────────────┬──────────┬────────────┐
-│ # │ Title         │ Status  │ Source                     │ Last Ch. │ Downloaded │
-├───┼───────────────┼─────────┼────────────────────────────┼──────────┼────────────┤
-│ 1 │ One Piece     │ reading │ tcbonepiecechapters.com    │ —        │ 0          │
-│ 2 │ Solo Leveling │ reading │ mangafire.to (+1)          │ —        │ 0          │
-└───┴───────────────┴─────────┴────────────────────────────┴──────────┴────────────┘
+┌───┬───────────────┬─────────┬────────────────────────────┬──────────┬────────────┬────────┐
+│ # │ Title         │ Status  │ Source                     │ Last Ch. │ Downloaded │  Mode  │
+│   │               │         │                            │          │            │ Kindle │
+├───┼───────────────┼─────────┼────────────────────────────┼──────────┼────────────┼────────┤
+│ 1 │ One Piece     │ reading │ tcbonepiecechapters.com    │ —        │ 0          │  auto  │
+│   │               │         │                            │          │            │   on   │
+├───┼───────────────┼─────────┼────────────────────────────┼──────────┼────────────┼────────┤
+│ 2 │ Solo Leveling │ reading │ mangafire.to (+1)          │ —        │ 0          │  auto  │
+│   │               │         │                            │          │            │   on   │
+└───┴───────────────┴─────────┴────────────────────────────┴──────────┴────────────┴────────┘
 ```
 
 ### Remove a manga
@@ -414,8 +443,32 @@ run remove "#1"
 ```
 
 A title that matches more than one manga is refused and the matches are
-listed, so use the full title. `--yes` skips the confirmation but keeps the
-download history; add `--purge` to remove that too.
+listed, so use the full title.
+
+Removing only stops tracking: download history and downloaded files are
+kept unless you ask for more.
+
+| Option | Effect |
+|---|---|
+| `-y`, `--yes` | Skip the removal confirmation. It never purges history or deletes files. |
+| `--purge-history` | Also remove its download history. `--purge` is an older alias. |
+| `--keep-files` | Keep its downloaded files (the default). |
+| `--delete-files` | Also delete its download folder, `<download dir>/<title>`. |
+
+`--keep-files` and `--delete-files` can't be combined. Without `--yes`, a
+terminal session asks whether to remove the manga, then whether to remove
+its history and its files (both default to no); the flags answer those
+questions up front. Without a terminal (cron, scripts) nothing is asked,
+so `--yes` is required:
+
+```bash
+run remove "One Piece" --yes --purge-history --delete-files
+```
+
+`--delete-files` only deletes that manga's own folder inside the download
+directory. It refuses, before changing anything, if that folder is a
+symlink or another tracked manga uses the same folder. Files saved at the
+top of the download directory by old versions are left alone.
 
 ---
 
@@ -447,13 +500,37 @@ That's it — MeManga checks all your manga and downloads new chapters automatic
 These are the command-line equivalents if you prefer typing commands directly in your terminal (not inside the menu):
 
 ```bash
-run check                        # Interactive — asks y/n per chapter
-run check --auto                 # Auto-download all new chapters
-run check -t "One Piece"        # Check one specific manga
-run check -t "One Piece" --auto # Auto-download for one manga
-run check --dry-run              # Preview what's new without downloading
-run check --auto --quiet         # Quiet mode (for scripts and cron)
+run check                            # Interactive — asks y/n per chapter
+run check --download                 # Download all new chapters without asking
+run check -t "One Piece"             # Check one specific manga
+run check -t "One Piece" --download  # Download new chapters for one manga
+run check --dry-run                  # Check only: list what's new, change nothing
+run check --auto --quiet             # What scheduled checks run (never prompts)
 ```
+
+### Check modes
+
+`check` runs in one of three modes:
+
+| Mode | How to pick it | What happens |
+|------|----------------|--------------|
+| Check only | `--dry-run` (`-n`) | Lists the chapters a download run would fetch, with the same backup-delay and suspicious-batch rules. Nothing is downloaded, emailed or post-processed, and nothing is saved: no check history or last-check time, no backup-delay clock, no suspicious-batch record or notification, and a held batch stays held. `--dry-run` wins over `--download` and its aliases. |
+| Download | `--download` (aliases `-a`/`--auto` and `-y`/`--yes`) | Downloads every new chapter without asking. |
+| Ask | neither flag | On a terminal, asks once per chapter. Without a terminal (cron, pipes, CI), or with `--quiet`, it downloads nothing and exits `1` with a hint. |
+
+`--auto` and `--yes` keep working and are not deprecated; existing cron
+lines such as `check --auto --quiet` behave as before. `--quiet` only
+means "never prompt"; it doesn't give permission to download and doesn't
+shorten the output. `--all` and `--from N` choose where to start
+(`--all` is `--from 0`); they don't download anything without
+`--download`, and they skip the suspicious-batch check, so preview them
+with `--dry-run` first.
+
+A suspicious batch (a sudden jump in chapter numbers that no backup
+source confirms) is withheld, and the run still exits `0` with a warning
+on stderr. Run `check --download --force-suspicious` to accept it. With
+`--dry-run --force-suspicious` the preview shows what accepting it would
+download, but the batch stays held.
 
 ---
 
@@ -477,7 +554,7 @@ That's all you need. MeManga downloads every chapter from chapter 1 onward. Safe
 The command-line equivalent, typed directly in your terminal (not inside the menu):
 
 ```bash
-run check -t "One Piece" --from 1 --auto --safe
+run check -t "One Piece" --from 1 --download --safe
 ```
 
 **What each flag does:**
@@ -486,7 +563,7 @@ run check -t "One Piece" --from 1 --auto --safe
 |------|---------|
 | `-t "One Piece"` | Target a specific manga |
 | `--from 1` | Start from chapter 1 instead of where you left off |
-| `--auto` | Download without prompting for each chapter |
+| `--download` | Download without prompting for each chapter (`--auto` and `--yes` are aliases) |
 | `--safe` | Restart the browser every 3 chapters to prevent memory buildup |
 
 The `--safe` flag is important for bulk downloads — without it, the browser can consume too much memory after many chapters.
@@ -511,19 +588,19 @@ This downloads chapter 50, 51, 52, etc. Chapters you already have are automatica
 ### Using CLI commands
 
 ```bash
-run check -t "One Piece" --from 50 --auto --safe
+run check -t "One Piece" --from 50 --download --safe
 ```
 
 Start from chapter 100 in EPUB format:
 
 ```bash
-run check -t "One Piece" --from 100 --auto --safe --format epub
+run check -t "One Piece" --from 100 --download --safe --format epub
 ```
 
 Start from a decimal chapter:
 
 ```bash
-run check -t "One Piece" --from 55.5 --auto
+run check -t "One Piece" --from 55.5 --download
 ```
 
 ---
@@ -539,7 +616,8 @@ Each manga has a status that controls whether it gets checked during `run check`
 | `dropped` | No | Stopped reading |
 | `completed` | No | Manga is finished, no more chapters expected |
 
-New manga default to `reading`.
+New manga default to `reading`; pass `add --status` to start with another
+status.
 
 ### Set a manga to on-hold
 
@@ -625,7 +703,7 @@ run check --format epub
 Download one manga in CBZ:
 
 ```bash
-run check -t "One Piece" --format cbz --auto
+run check -t "One Piece" --format cbz --download
 ```
 
 ---
@@ -759,7 +837,7 @@ The app password is stored in your system keyring when available. If the keyring
 ### Step 4 — Test it
 
 ```bash
-run check --auto
+run check --download
 ```
 
 When a new chapter is found and downloaded, MeManga sends it to your Kindle automatically. If the PDF exceeds 23MB, it's automatically split into smaller parts.
@@ -810,6 +888,10 @@ Add a backup source? [y/n]: y
 run add -t "Jujutsu Kaisen" -u "https://tcbonepiecechapters.com/mangas/13/jjk" -b "https://mangadex.org/title/some-uuid" --fallback-days 3
 ```
 
+`--fallback-days` accepts whole numbers of days, 0 or greater (default: 2).
+Use `--fallback-days 0` to use the backup immediately. Negative values and
+non-integers are rejected before any config is saved.
+
 ### How fallback works
 
 1. MeManga checks the primary source first
@@ -828,13 +910,13 @@ manga:
       - url: "https://mangadex.org/title/some-uuid"
 ```
 
-Set `fallback_delay_days: 0` to use the backup immediately without waiting.
-
 ---
 
 ## Updating Manga Details
 
-Change the URL, backup, or title of a tracked manga.
+Change the sources, title, or per-manga settings of a tracked manga.
+`edit` is an alias for `update`. Only the fields you pass change; everything
+else is kept.
 
 ### Change the primary URL
 
@@ -853,6 +935,52 @@ run update "One Piece" -b "https://mangadex.org/title/uuid-here"
 ```bash
 run update "One Piece" -t "One Piece (Colored)"
 ```
+
+### Remove the backup source
+
+```bash
+run update "One Piece" --no-backup
+```
+
+This removes every backup source and the fallback delay, like clearing the
+backup field in the desktop app. `--backup ""` is rejected instead of
+silently removing it.
+
+### Change the fallback delay
+
+```bash
+run update "One Piece" --fallback-days 0
+run update "One Piece" -b "https://mangadex.org/title/uuid-here" --fallback-days 3
+```
+
+`--fallback-days` takes whole numbers of days, 0 or greater. It needs a
+backup source: the manga must already have one, or you add it with `--backup`
+in the same command. It cannot be combined with `--no-backup`.
+
+### Change status, mode, or the Kindle toggle
+
+```bash
+run update "One Piece" --status on-hold --mode manual --no-kindle
+```
+
+| Flag | Values |
+|------|--------|
+| `--status` | `reading`, `on-hold`, `dropped`, `completed` (same as `set`) |
+| `--mode` | `auto`, `manual` |
+| `--kindle` / `--no-kindle` | per-manga Kindle toggle on or off |
+
+These are the same per-manga settings `add` accepts (see above), with the
+same desktop-app-only effect of `--mode` and the Kindle toggle. Output format
+stays global (`config`, or `check --format`); there is no per-manga format.
+
+### Combining changes
+
+Flags can be combined in one command. Every value is checked before anything
+is saved, so an invalid URL, an empty title, a title that another manga
+already uses, or a conflicting combination (`--backup` with `--no-backup`,
+`--kindle` with `--no-kindle`, `--fallback-days` with `--no-backup` or
+without a backup) leaves `config.yaml` untouched. If every given value already
+matches, nothing is written.
 
 ### You can also update by list number
 
@@ -974,16 +1102,21 @@ run import memanga_export.json --replace
 |---------|-------------|
 | `run` | Open the interactive TUI |
 | `run list` | Show tracked manga with status and progress |
+| `run list --json` | Tracked manga as JSON (see [JSON output](#json-output)) |
+| `run list --status reading` | Only one status (repeat `--status` for several) |
+| `run list --sort title` | Sort by `list` (default), `title`, `status`, `last-chapter` or `downloaded` |
+| `run list --sort downloaded --reverse` | Reverse the sort order |
 | `run add -i` | Add manga interactively |
 | `run add -t "Title" -u URL` | Add manga directly |
 | `run add -t "Title" -u URL -b BACKUP` | Add with backup source |
+| `run add -t "Title" -u URL --status on-hold --mode manual --no-kindle` | Add with status, mode and Kindle setting |
 | `run check` | Check for new chapters (interactive) |
-| `run check --auto` | Auto-download all new chapters |
+| `run check --download` | Download all new chapters without asking (`--auto`, `--yes` are aliases) |
 | `run check -t "Title"` | Check one manga |
-| `run check -t "Title" --from 1 --auto --safe` | Download from chapter 1 |
-| `run check -t "Title" --from 50 --auto` | Download from chapter 50 |
+| `run check -t "Title" --from 1 --download --safe` | Download from chapter 1 |
+| `run check -t "Title" --from 50 --download` | Download from chapter 50 |
 | `run check --format epub` | Override output format |
-| `run check --dry-run` | List new chapters without downloading |
+| `run check --dry-run` | Check only: list new chapters, download and save nothing |
 | `run set "Title" reading` | Set status to reading |
 | `run set "Title" on-hold` | Set status to on-hold |
 | `run set "Title" dropped` | Set status to dropped |
@@ -992,8 +1125,17 @@ run import memanga_export.json --replace
 | `run update "Title" -u URL` | Change primary source URL |
 | `run update "Title" -b URL` | Change backup source URL |
 | `run update "Title" -t "New Name"` | Rename a manga |
+| `run update "Title" --no-backup` | Remove the backup source |
+| `run update "Title" --fallback-days 3` | Change the backup fallback delay |
+| `run update "Title" --status on-hold --mode manual --no-kindle` | Change status, mode and Kindle setting |
 | `run config` | Configure settings (delivery, email, format) |
 | `run status` | Show overall status and config |
+| `run status --json` | Status and config as JSON, without secrets |
+| `run failed` | List failed and accepted-partial chapters |
+| `run failed -t "Title"` | Only manga whose title contains the text |
+| `run failed --retry` | Re-attempt every listed chapter |
+| `run failed --clear` | Forget the listed chapters |
+| `run failed --json` | Failed and partial chapters as JSON (listing only) |
 | `run sources` | List all supported sources |
 | `run cron install` | Set up daily automatic checks |
 | `run cron install --time 07:30` | Set custom check time |
@@ -1003,6 +1145,100 @@ run import memanga_export.json --replace
 | `run import FILE` | Import manga list from JSON |
 | `run import FILE --replace` | Import and replace all data |
 
+### JSON output
+
+With `--json`, `list`, `status` and `failed` print one JSON document to
+stdout and nothing else. Errors and warnings still go to stderr, so
+`memanga list --json | jq ...` is safe. Each payload has a top-level
+`schema_version` (currently `1`). New keys may be added within a
+version; it is bumped only when a key is renamed or removed or changes
+type, so ignore keys you don't use. Optional values are `null`, not
+missing.
+
+`list --json` keeps the order of `list`, including any `--status`
+filter and `--sort` order, and `count` is the number of entries shown:
+
+```json
+{
+  "schema_version": 1,
+  "count": 1,
+  "manga": [
+    {
+      "n": 1,
+      "title": "Blue Lock",
+      "status": "reading",
+      "source": "mangadex.org",
+      "source_display": "mangadex.org (+1)",
+      "url": "https://mangadex.org/title/...",
+      "sources": [
+        {"source": "mangadex.org", "url": "https://mangadex.org/title/..."},
+        {"source": "mangapill.com", "url": "https://mangapill.com/manga/..."}
+      ],
+      "last_chapter": "251",
+      "downloaded_count": 12,
+      "mode": "auto",
+      "send_to_kindle": true,
+      "backup_count": 1
+    }
+  ]
+}
+```
+
+`n` is the list number; pass it as `#N` to `set`, `update` or `remove`.
+It stays the same when `--status` or `--sort` hide or reorder entries.
+`source` and `url` are the primary source (`null` if there is none),
+and `sources` lists the primary first, then backups. `last_chapter`
+is a string or `null`. `mode` is `auto` or `manual`, `send_to_kindle`
+is the per-manga Kindle toggle (email delivery must also be on), and
+`backup_count` is the number of sources after the primary (shown as
+`(+N)` in the table's Source column).
+
+`--sort` orders `title` case-insensitively, `status` as reading,
+on-hold, dropped, completed, `last-chapter` numerically and
+`downloaded` by count, all ascending; `--reverse` flips it. Ties keep
+list order, and manga without a numeric last chapter (under
+`last-chapter`) or with an unknown status (under `status`) always come
+last.
+
+`status --json` has the keys `paths` (`config_dir`, `config`, `state`),
+`manga_count`, `output_format`, `delivery` (`mode`, `download_dir`,
+`delete_after_send`), `email` (`kindle_email`, `sender_email`,
+`smtp_server`, `smtp_port`), `post_processing` (`enabled`,
+`fail_on_error`), `partial_chapters` (`enabled`, `threshold_percent`),
+`cron` (`enabled`, `time`) and `last_check` (ISO timestamp or `null`).
+The email app password is never included.
+
+`failed --json` has one entry per chapter, sorted by title and then by
+chapter number. `title_filter` is the `-t` value or `null`:
+
+```json
+{
+  "schema_version": 1,
+  "title_filter": null,
+  "count": 1,
+  "chapters": [
+    {
+      "title": "Vinland Saga",
+      "chapter": "10",
+      "status": "failed",
+      "recorded_at": "2026-01-01T06:00:00",
+      "source": "mangadex.org",
+      "failed_pages": [3],
+      "total_pages": null,
+      "attempts": 2,
+      "error": "HTTP 503"
+    }
+  ]
+}
+```
+
+`status` is `failed` or `partial`. If a chapter has both records, it is
+listed once as `failed`. `chapter` is always a string. `attempts` and
+`error` are `null` for partial chapters, and `total_pages` is `null`
+for failed ones. `failed --json` only lists: combining it with
+`--retry` or `--clear` is a usage error (exit code `2`) and changes
+nothing.
+
 ### Exit codes
 
 Results go to stdout; errors and warnings go to stderr. Scripts and
@@ -1010,11 +1246,17 @@ cron jobs can rely on these exit codes:
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success |
-| `1` | Error: manga not found, invalid input, refused or failed command, or `check` could not check any manga |
+| `0` | Success. For `check`: no new chapters, a `--dry-run` listing, every chapter downloaded, or a suspicious batch withheld (the warning goes to stderr) |
+| `1` | Error: manga not found, invalid input, refused or failed command, `check` could not check any manga, or `check` skipped chapters that needed confirmation (no terminal, or `--quiet`, without `--download`) |
 | `2` | Invalid command-line usage |
 | `3` | `check` or `failed --retry` ran, but some chapters (or some manga's source checks) failed |
 | `130` | Interrupted with Ctrl-C |
+
+When `check` both skips unconfirmed chapters and has failures, it exits
+`1`.
+
+An exact title duplicate (ignoring case) is refused by `add` with exit code
+`1`, including with `--force` or `--yes`. The existing entry is preserved.
 
 ---
 
