@@ -1,10 +1,12 @@
 @echo off
 REM MeManga launcher for Windows
 
-cd /d "%~dp0..\.."
+REM Do not cd: relative paths in user arguments must resolve against the caller's directory.
+set "MEMANGA_PY=%~dp0..\..\venv\Scripts\python.exe"
 
-if exist "venv\Scripts\python.exe" (
-    venv\Scripts\python.exe -m memanga %*
+if exist "%MEMANGA_PY%" (
+    set "PYTHONPATH=%~dp0..\..;%PYTHONPATH%"
+    "%MEMANGA_PY%" -m memanga %*
 ) else (
     echo Error: Virtual environment not found.
     echo Please run: python setup.py

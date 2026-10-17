@@ -1,14 +1,15 @@
 #!/bin/bash
 # MeManga launcher for Linux/macOS
 
-# Navigate to project root
+# Do not cd: relative paths in user arguments must resolve against the caller's directory.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_DIR"
 
-# Activate venv if exists
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
+# Use the venv interpreter by absolute path if it exists
+if [ -x "$PROJECT_DIR/venv/bin/python" ]; then
+    PY="$PROJECT_DIR/venv/bin/python"
+else
+    PY="python3"
 fi
 
-python3 -m memanga "$@"
+PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m memanga "$@"
