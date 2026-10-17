@@ -38,9 +38,9 @@ from .cron import (build_cron_line, build_task_command, managed_lines,
                    read_crontab,
                    remove_managed_lines, replace_managed_line,
                    source_checkout_root, unmanaged_memanga_lines)
-from . import doctor
+from . import __version__, completion, doctor
 from .state import State, _chapter_number
-from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
+from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, DEFAULT_PAGE_RETRIES, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
 from .scrapers import get_scraper
 from .search import compute_search_sources, probe_chapter_counts, sweep
 from .emailer import send_to_kindle, EmailError
@@ -237,6 +237,9 @@ def _get_sources_display(manga: Dict[str, Any]) -> str:
 
 # Issue #346: `list --sort` keys. "list" is the config order (the default).
 LIST_SORT_KEYS = ["list", "title", "status", "last-chapter", "downloaded"]
+DEFAULT_LIST_SORT = LIST_SORT_KEYS[0]
+
+DEFAULT_EXPORT_FILE = "memanga_export.json"
 
 
 def _list_sort_value(entry: Dict[str, Any], key: str):
@@ -256,7 +259,7 @@ def _list_sort_value(entry: Dict[str, Any], key: str):
     return entry["n"]
 
 
-def _list_entries(statuses=None, sort: str = "list", reverse: bool = False) -> List[Dict[str, Any]]:
+def _list_entries(statuses=None, sort: str = DEFAULT_LIST_SORT, reverse: bool = False) -> List[Dict[str, Any]]:
     """Entries for `list` and `list --json`, filtered and sorted.
 
     `n` is always the position in the full list, so `#N` keeps working
@@ -295,7 +298,7 @@ def _list_entries(statuses=None, sort: str = "list", reverse: bool = False) -> L
     return entries
 
 
-def _list_payload(statuses=None, sort: str = "list", reverse: bool = False) -> Dict[str, Any]:
+def _list_payload(statuses=None, sort: str = DEFAULT_LIST_SORT, reverse: bool = False) -> Dict[str, Any]:
     """`list --json` payload: one entry per listed manga, in output order."""
     entries = _list_entries(statuses, sort, reverse)
     return {
@@ -308,7 +311,7 @@ def _list_payload(statuses=None, sort: str = "list", reverse: bool = False) -> D
 def cmd_list(args):
     """List all tracked manga."""
     statuses = getattr(args, "status", None)
-    sort = getattr(args, "sort", None) or "list"
+    sort = getattr(args, "sort", None) or DEFAULT_LIST_SORT
     reverse = getattr(args, "reverse", False)
     if getattr(args, "json", False):
         _print_json(_list_payload(statuses, sort, reverse))
@@ -357,7 +360,7 @@ def cmd_list(args):
 def _ask_fallback_days() -> int:
     """Prompt until the fallback delay is a whole number of days >= 0."""
     while True:
-        days = IntPrompt.ask("⏱️  Fallback delay (days)", default=2)
+        days = IntPrompt.ask("⏱️  Fallback delay (days)", default=DEFAULT_FALLBACK_DELAY_DAYS)
         if days >= 0:
             return days
         console.print("[prompt.invalid]Please enter 0 or more days")
@@ -368,7 +371,7 @@ def cmd_add(args):
     from urllib.parse import urlparse
     
     backup_url = None
-    fallback_days = 2
+    fallback_days = DEFAULT_FALLBACK_DELAY_DAYS
     
     # Issue #238: flag-driven `add` never prompts; --force (alias --yes)
     # accepts an unsupported source or a similar title deliberately.
@@ -409,7 +412,7 @@ def cmd_add(args):
         backup_url = getattr(args, 'backup', None)
         fallback_days = getattr(args, 'fallback_days', None)
         if fallback_days is None:
-            fallback_days = 2
+            fallback_days = DEFAULT_FALLBACK_DELAY_DAYS
         
         if not title or not url:
             return _error("[red]Error:[/red] --title and --url required (or use --interactive)")
@@ -926,7 +929,7 @@ def cmd_update(args):
         console.print(f"  {_esc(c)}")
 
 
-def _pipeline_options(output_format=None, max_retries=3,
+def _pipeline_options(output_format=None, max_retries=DEFAULT_PAGE_RETRIES,
                       allow_partial=None, partial_threshold=None):
     """Download settings shared by `check` and `failed retry` (#352).
 
@@ -1234,7 +1237,7 @@ def cmd_check(args):
         allow_partial = False
     pipeline = _pipeline_options(
         output_format=getattr(args, 'format', None),
-        max_retries=getattr(args, 'retries', 3),
+        max_retries=getattr(args, 'retries', DEFAULT_PAGE_RETRIES),
         allow_partial=allow_partial,
         partial_threshold=getattr(args, 'partial_threshold', None),
     )
@@ -2272,7 +2275,7 @@ def cmd_export(args):
         "state": manga_state,
     }
 
-    output_file = args.file or "memanga_export.json"
+    output_file = args.file or DEFAULT_EXPORT_FILE
 
     if output_file == "-":
         json.dump(export_data, sys.stdout, indent=2, default=str)
@@ -2840,7 +2843,7 @@ def cmd_tui(args):
                     safe=safe,
                     dry_run=False,
                     format=fmt,
-                    retries=3,
+                    retries=DEFAULT_PAGE_RETRIES,
                 ))
         elif choice == "5":
             retry = Confirm.ask("Retry all failed downloads?", default=False)
@@ -2863,7 +2866,7 @@ def cmd_tui(args):
                 new_title = Prompt.ask("New title (leave blank to skip)", default="") or None
                 cmd_update(argparse.Namespace(target=target, url=url, backup=backup, title=new_title))
         elif choice == "e":
-            file_path = Prompt.ask("Export file", default="memanga_export.json")
+            file_path = Prompt.ask("Export file", default=DEFAULT_EXPORT_FILE)
             cmd_export(argparse.Namespace(file=file_path))
         elif choice == "i":
             file_path = Prompt.ask("Import file path")
@@ -2875,6 +2878,16 @@ def cmd_tui(args):
 
         console.print()
         Prompt.ask("[dim]Press Enter to continue[/dim]")
+
+
+def cmd_completion(args):
+    """Print a shell completion script built from the parser (#248).
+
+    Written with sys.stdout, not Rich, so the script is never wrapped
+    or styled.
+    """
+    sys.stdout.write(completion.script(args.shell, build_parser()))
+    return EXIT_OK
 
 
 # ============================================================================
@@ -2907,7 +2920,16 @@ def _flush_state_on_interrupt():
         err_console.print(f"[yellow]⚠️  Could not save state: {_esc(e)}[/yellow]")
 
 
-def _main():
+def _subparser(parser, name):
+    """Return the subcommand parser registered under ``name``."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices[name]
+    raise KeyError(name)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the `memanga` argument parser (also used for completion)."""
     _cli_only = bool(os.environ.get("MEMANGA_CLI_ONLY"))
 
     _epilog = """
@@ -2917,6 +2939,7 @@ Examples:
   memanga add -t "Solo Leveling" -u URL # Add manga directly
   memanga search "Blue Lock"            # Find a manga across sources
   memanga check                         # Check for new chapters
+  memanga check "Solo Leveling"         # Check one manga (same as -t)
   memanga check --download              # Download new chapters, no prompts
   memanga check --dry-run               # Only list new chapters
   memanga doctor                        # Diagnose setup problems
@@ -2924,14 +2947,21 @@ Examples:
   memanga config                        # Configure settings
   memanga config set KEY VALUE          # Change one setting
   memanga --config-dir DIR status       # Use another config directory
+  memanga completion bash               # Print a shell completion script
 """
     if not _cli_only:
         _epilog += "  memanga --gui                         # Launch graphical interface\n"
 
+    # A fixed prog keeps usage and error lines stable under both the
+    # `memanga` script and `python -m memanga` (issue #248).
     parser = argparse.ArgumentParser(
+        prog="memanga",
         description="📖 MeManga - Automatic manga downloader",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_epilog,
+    )
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--config-dir", metavar="DIR",
@@ -2953,8 +2983,8 @@ Examples:
     p_list.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_list.add_argument("--status", action="append", choices=VALID_STATUSES,
                         help="Only show manga with this status (repeat for several)")
-    p_list.add_argument("--sort", choices=LIST_SORT_KEYS, default="list",
-                        help="Sort order (default: list, the order manga were added). "
+    p_list.add_argument("--sort", choices=LIST_SORT_KEYS, default=DEFAULT_LIST_SORT,
+                        help=f"Sort order (default: {DEFAULT_LIST_SORT}, the order manga were added). "
                              "Ties keep list order; # stays the list number for #N")
     p_list.add_argument("--reverse", action="store_true",
                         help="Reverse the sort; manga with no numeric last chapter "
@@ -2966,8 +2996,10 @@ Examples:
     p_add.add_argument("-t", "--title", help="Manga title")
     p_add.add_argument("-u", "--url", help="Primary source URL")
     p_add.add_argument("-b", "--backup", help="Backup source URL")
-    p_add.add_argument("--fallback-days", type=_non_negative_int_arg, default=2,
-                       help="Days to wait before using backup (0 or more; default: 2)")
+    p_add.add_argument("--fallback-days", type=_non_negative_int_arg,
+                       default=DEFAULT_FALLBACK_DELAY_DAYS,
+                       help="Days to wait before using backup (0 or more; "
+                            f"default: {DEFAULT_FALLBACK_DELAY_DAYS})")
     p_add.add_argument("--status", choices=VALID_STATUSES,
                        help="Initial status (default: reading)")
     p_add.add_argument("--mode", choices=["auto", "manual"],
@@ -3054,7 +3086,10 @@ Examples:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_check.add_argument("-t", "--title", help="Check one manga only (title, or #N from 'memanga list')")
+    # Issue #248: positional TARGET like set/remove/update; -t stays.
+    p_check.add_argument("target", nargs="?", metavar="TARGET",
+                         help="Check one manga only (title, or #N from 'memanga list')")
+    p_check.add_argument("-t", "--title", help="Same as TARGET")
     p_check.add_argument("-f", "--from", dest="from_chapter", type=float, help="Start from chapter N (for fresh downloads)")
     p_check.add_argument("--all", action="store_true", help="Start from the first chapter (backfill; skips the suspicious-batch check)")
     p_check.add_argument("--download", "-a", "--auto", "-y", "--yes", dest="download", action="store_true",
@@ -3066,7 +3101,8 @@ Examples:
                          help="Check only: list what would be downloaded; no downloads or state changes (wins over --download)")
     p_check.add_argument("--force-suspicious", action="store_true", help="Accept a chapter batch even if it was flagged as suspicious")
     p_check.add_argument("--format", choices=["pdf", "epub", "cbz", "zip", "jpg", "png", "webp"], help="Output format (overrides config)")
-    p_check.add_argument("--retries", type=int, default=3, metavar="N", help="Retry failed page downloads N times (default: 3, 0 to disable)")
+    p_check.add_argument("--retries", type=int, default=DEFAULT_PAGE_RETRIES, metavar="N",
+                         help=f"Retry failed page downloads N times (default: {DEFAULT_PAGE_RETRIES}, 0 to disable)")
     # Partial-chapter tolerance (issue #86) — config is the source of truth;
     # these override it for a single run.
     partial_grp = p_check.add_mutually_exclusive_group()
@@ -3150,7 +3186,8 @@ Examples:
 
     # export
     p_export = subparsers.add_parser("export", help="Export manga list and state to JSON")
-    p_export.add_argument("file", nargs="?", default="memanga_export.json", help="Output file, or - for stdout (default: memanga_export.json)")
+    p_export.add_argument("file", nargs="?", default=DEFAULT_EXPORT_FILE,
+                          help=f"Output file, or - for stdout (default: {DEFAULT_EXPORT_FILE})")
     p_export.set_defaults(func=cmd_export)
 
     # import
@@ -3224,8 +3261,38 @@ Examples:
     # tui (default if no command)
     p_tui = subparsers.add_parser("tui", help="Interactive terminal UI")
     p_tui.set_defaults(func=cmd_tui)
-    
+
+    # completion (issue #248)
+    p_completion = subparsers.add_parser(
+        "completion",
+        help="Print a shell completion script (bash)",
+        description=(
+            "Print a completion script for SHELL to stdout. Only bash is\n"
+            "supported for now.\n\n"
+            "Load it for the current session, or add the line to ~/.bashrc:\n"
+            "  source <(memanga completion bash)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_completion.add_argument("shell", choices=completion.SHELLS, help="Target shell")
+    p_completion.set_defaults(func=cmd_completion)
+
+    return parser
+
+
+def _main():
+    _cli_only = bool(os.environ.get("MEMANGA_CLI_ONLY"))
+    parser = build_parser()
+    p_check = _subparser(parser, "check")
+    p_config = _subparser(parser, "config")
+    p_failed = _subparser(parser, "failed")
+
     args = parser.parse_args()
+
+    if args.command == "check":
+        if args.target and args.title and args.target != args.title:
+            p_check.error("give the target once: TARGET or -t/--title")
+        args.title = args.title or args.target
 
     if args.command == "failed":
         action = getattr(args, "failed_action", None)
@@ -3254,6 +3321,11 @@ Examples:
     # The GUI builds its own Config/State under the default root.
     if args.gui and args.config_dir:
         parser.error("--config-dir is not supported with --gui")
+
+    # Needs no config or state, so it works before setup and never
+    # writes to the config directory.
+    if args.command == "completion" and not args.gui:
+        sys.exit(args.func(args))
     use_context(build_context(
         None if args.gui else resolve_config_dir(args.config_dir)
     ))
