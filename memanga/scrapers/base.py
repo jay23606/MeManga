@@ -45,7 +45,26 @@ def looks_like_image(content: bytes, content_type: str = "") -> bool:
     return ctype.startswith("image/")
 
 
-def _retry(func, max_attempts=3, base_delay=1.0, exceptions=(Exception,)):
+def is_retryable_request_error(error: BaseException) -> bool:
+    """Whether a failed request can reasonably succeed if sent again.
+
+    Connection errors, timeouts, 429 and 5xx responses are retryable.
+    Other HTTP errors (403, 404, 410, ...) are permanent, so retrying them
+    only spends requests against a source that already refused.
+    """
+    if isinstance(error, requests.HTTPError):
+        response = error.response
+        if response is None:
+            return True
+        return response.status_code == 429 or response.status_code >= 500
+    return isinstance(error, (
+        requests.ConnectionError,
+        requests.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+    ))
+
+
+def _retry(func, max_attempts=3, base_delay=1.0, exceptions=(Exception,), retry_if=None):
     """Retry an operation with exponential backoff.
 
     Args:
@@ -53,6 +72,8 @@ def _retry(func, max_attempts=3, base_delay=1.0, exceptions=(Exception,)):
         max_attempts: Maximum number of attempts
         base_delay: Base delay in seconds (doubles each attempt)
         exceptions: Tuple of exception types to catch and retry
+        retry_if: Optional predicate; a caught exception it returns False
+            for is raised right away instead of being retried
 
     Returns:
         Result of func()
@@ -62,6 +83,8 @@ def _retry(func, max_attempts=3, base_delay=1.0, exceptions=(Exception,)):
         try:
             return func()
         except exceptions as e:
+            if retry_if is not None and not retry_if(e):
+                raise
             last_error = e
             if attempt < max_attempts:
                 delay = base_delay * (2 ** (attempt - 1))
@@ -141,6 +164,7 @@ class BaseScraper(ABC):
             max_attempts=3,
             base_delay=1.0,
             exceptions=(requests.RequestException,),
+            retry_if=is_retryable_request_error,
         )
 
     def _get_html(self, url: str) -> str:

@@ -30,7 +30,7 @@ import requests
 from typing import List, Optional
 from pathlib import Path
 
-from .base import BaseScraper, Chapter, Manga, _retry
+from .base import BaseScraper, Chapter, Manga, _retry, is_retryable_request_error
 from .playwright_base import PlaywrightScraper
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ class KaganeScraper(PlaywrightScraper):
             max_attempts=3,
             base_delay=1.0,
             exceptions=(requests.RequestException,),
+            retry_if=is_retryable_request_error,
         )
 
     @staticmethod
