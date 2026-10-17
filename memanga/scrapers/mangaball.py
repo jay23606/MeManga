@@ -22,7 +22,15 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper, Chapter, Manga, _retry
+from .base import BaseScraper, Chapter, Manga, _retry, is_retryable_request_error
+
+
+def _is_retryable_post_error(error: BaseException) -> bool:
+    """A 419 means the CSRF token expired; it is refreshed before the retry."""
+    response = getattr(error, "response", None)
+    if isinstance(error, requests.HTTPError) and response is not None and response.status_code == 419:
+        return True
+    return is_retryable_request_error(error)
 
 
 class MangaBallScraper(BaseScraper):
@@ -100,6 +108,7 @@ class MangaBallScraper(BaseScraper):
             max_attempts=3,
             base_delay=1.0,
             exceptions=(requests.RequestException,),
+            retry_if=_is_retryable_post_error,
         )
 
     # URL helpers

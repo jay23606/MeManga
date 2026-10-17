@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import time
 import pytest
+import requests
 
 from memanga.scrapers.base import (
-    BaseScraper, Chapter, Manga, _retry, looks_like_image,
+    BaseScraper, Chapter, Manga, _retry, is_retryable_request_error, looks_like_image,
 )
 
 
@@ -95,6 +96,47 @@ class TestRetry:
         with pytest.raises(ValueError):
             _retry(fn, max_attempts=3, base_delay=0.001, exceptions=(IOError,))
 
+    def test_retry_if_false_raises_without_retrying(self):
+        calls = []
+        def fn():
+            calls.append(1)
+            raise OSError("permanent")
+        with pytest.raises(OSError):
+            _retry(fn, max_attempts=3, base_delay=0.001, retry_if=lambda e: False)
+        assert len(calls) == 1
+
+
+def _http_error(status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f"{status} error", response=response)
+
+
+class TestRetryableRequestError:
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+    def test_retryable_statuses(self, status):
+        assert is_retryable_request_error(_http_error(status))
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 410])
+    def test_permanent_statuses(self, status):
+        assert not is_retryable_request_error(_http_error(status))
+
+    @pytest.mark.parametrize("error", [
+        requests.ConnectionError("refused"),
+        requests.Timeout("slow"),
+        requests.exceptions.ChunkedEncodingError("cut off"),
+    ])
+    def test_transport_errors_are_retryable(self, error):
+        assert is_retryable_request_error(error)
+
+    def test_invalid_url_is_not_retryable(self):
+        assert not is_retryable_request_error(requests.exceptions.InvalidURL("bad"))
+
+    def test_mangaball_still_retries_an_expired_csrf_token(self):
+        from memanga.scrapers.mangaball import _is_retryable_post_error
+        assert _is_retryable_post_error(_http_error(419))
+        assert not _is_retryable_post_error(_http_error(404))
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Concrete subclass for testing BaseScraper instance behavior
@@ -123,6 +165,34 @@ class TestRateLimit:
         s._request("https://x/2")
         # Second call must be at least 50ms after the first
         assert calls[1] - calls[0] >= 0.04
+
+
+class TestRequestRetries:
+    def _scraper(self, monkeypatch, statuses):
+        s = _DummyScraper()
+        s._rate_limit = 0
+        monkeypatch.setattr("memanga.scrapers.base.time.sleep", lambda _s: None)
+        calls = []
+        def fake_get(url, **kw):
+            calls.append(url)
+            response = requests.Response()
+            response.status_code = statuses[min(len(calls), len(statuses)) - 1]
+            response._content = b"ok"
+            return response
+        monkeypatch.setattr(s.session, "get", fake_get)
+        return s, calls
+
+    @pytest.mark.parametrize("status", [403, 404, 410])
+    def test_permanent_http_error_is_not_retried(self, monkeypatch, status):
+        s, calls = self._scraper(monkeypatch, [status])
+        with pytest.raises(requests.HTTPError):
+            s._request("https://x/gone")
+        assert len(calls) == 1
+
+    def test_server_error_is_retried(self, monkeypatch):
+        s, calls = self._scraper(monkeypatch, [503, 200])
+        assert s._request("https://x/busy").text == "ok"
+        assert len(calls) == 2
 
 
 class TestGetCoverUrl:

@@ -62,6 +62,10 @@ All notable changes are recorded here. Format loosely follows
   prompts and never gives permission to download.
 
 ### Fixed
+- #398 Scraper requests no longer retry permanent HTTP errors. A 403, 404
+  or 410 (and other 4xx) used to be sent three times with back-off; now
+  only connection errors, timeouts, 429 and 5xx responses are retried.
+  MangaBall still retries a 419 after refreshing its CSRF token.
 - #351 `memanga check --dry-run` no longer changes state. It used to
   record a check (last-check time and a history entry counting listed
   chapters as downloaded), start or clear backup-delay clocks, advance the

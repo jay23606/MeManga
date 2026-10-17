@@ -12,7 +12,7 @@ from pathlib import Path
 
 import requests
 
-from .base import BaseScraper, Chapter, Manga, _retry
+from .base import BaseScraper, Chapter, Manga, _retry, is_retryable_request_error
 
 
 class MangagoScraper(BaseScraper):
@@ -53,13 +53,15 @@ class MangagoScraper(BaseScraper):
 
         # ConnectionError / ConnectTimeout mean the host is unreachable
         # from here; retrying only multiplies the wait, so let them raise
-        # on the first attempt. Only post-connect hiccups are retried.
+        # on the first attempt. Only post-connect hiccups are retried, and
+        # permanent HTTP errors (403, 404, 410, ...) raise right away.
         return _retry(
             _do_request,
             max_attempts=3,
             base_delay=1.0,
             exceptions=(requests.exceptions.ReadTimeout,
                         requests.exceptions.HTTPError),
+            retry_if=is_retryable_request_error,
         )
 
     def search(self, query: str) -> List[Manga]:

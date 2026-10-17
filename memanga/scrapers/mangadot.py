@@ -24,7 +24,7 @@ from urllib.parse import quote_plus, urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper, Chapter, Manga, _retry
+from .base import BaseScraper, Chapter, Manga, _retry, is_retryable_request_error
 
 
 class MangadotScraper(BaseScraper):
@@ -221,6 +221,7 @@ class MangadotScraper(BaseScraper):
             max_attempts=3,
             base_delay=1.0,
             exceptions=(requests.RequestException,),
+            retry_if=is_retryable_request_error,
         )
 
     def _parse_pages(self, payload: Optional[dict]) -> List[str]:

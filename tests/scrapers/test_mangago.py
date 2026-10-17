@@ -45,6 +45,12 @@ class _FakeGet:
         raise self._raise
 
 
+def _http_error(status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f"{status} error", response=response)
+
+
 # -- connection failures must fail fast (no BaseScraper 3x retry) --
 
 
@@ -113,6 +119,33 @@ class TestTransientErrorsStillRetry:
             scraper.search("one piece")
 
         assert get.calls == 3
+
+    def test_server_error_response_is_retried(self, scraper, monkeypatch,
+                                              no_real_sleep):
+        get = _FakeGet(_http_error(503))
+        monkeypatch.setattr(scraper.session, "get", get)
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            scraper.search("one piece")
+
+        assert get.calls == 3
+
+
+# -- permanent HTTP errors are not retried (#398) --
+
+
+class TestPermanentHttpErrorsNotRetried:
+    @pytest.mark.parametrize("status", [403, 404, 410])
+    def test_permanent_status_tried_once(self, scraper, monkeypatch,
+                                         no_real_sleep, status):
+        get = _FakeGet(_http_error(status))
+        monkeypatch.setattr(scraper.session, "get", get)
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            scraper.search("one piece")
+
+        assert get.calls == 1
+        assert no_real_sleep == []
 
 
 # -- download_image bypasses _request but must still bound connect --
