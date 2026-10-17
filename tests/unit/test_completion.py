@@ -2,9 +2,11 @@
 
 The bash tests source the generated script and call the completion
 function with a synthetic COMP_WORDS, so they check what a user sees on
-TAB, not just the script text. Only bash is supported.
+TAB, not just the script text. Only bash is supported. Source-name
+suggestions for `search --source` are from #260.
 """
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -12,6 +14,9 @@ import sys
 import pytest
 
 from memanga import cli, completion
+from memanga.scrapers import list_supported_sources
+from memanga.scrapers.registry import TEMPLATE_SCRAPERS
+from memanga.search import BROKEN_SEARCH_SOURCES, compute_search_sources
 
 needs_bash = pytest.mark.skipif(
     sys.platform == "win32" or shutil.which("bash") is None,
@@ -63,6 +68,54 @@ class TestScript:
     def test_hidden_options_are_left_out(self, monkeypatch):
         monkeypatch.setenv("MEMANGA_CLI_ONLY", "1")
         assert "gui" not in completion.script("bash", cli.build_parser())
+
+
+class _NoConfig:
+    """A config with no library and nothing disabled."""
+
+    def get(self, key, default=None):
+        return default
+
+
+def _suggesting_parser(words):
+    parser = argparse.ArgumentParser(prog="memanga")
+    completion.suggest(parser.add_argument("--source"), words)
+    return parser
+
+
+# Odd words a suggestion list could hold; none may reach the script.
+UNSAFE_WORDS = ["two words", "$(touch pwned)", "`id`", "a;b", "it's",
+                'say"hi', "x|y", "*", "~", "", "tab\tword", "new\nline"]
+
+
+class TestSuggest:
+    def test_suggested_words_do_not_restrict_the_value(self):
+        parser = _suggesting_parser(lambda: ["a.org", "b.net"])
+        assert parser.parse_args(["--source", "WWW.Other.ORG"]).source == "WWW.Other.ORG"
+        assert '"a.org b.net"' in completion.script("bash", parser)
+
+    def test_words_are_only_read_when_generating(self):
+        def words():
+            raise AssertionError("read at parse time")
+
+        parser = _suggesting_parser(words)
+        assert parser.parse_args(["--source", "x"]).source == "x"
+        with pytest.raises(AssertionError):
+            completion.script("bash", parser)
+
+    def test_unsafe_words_are_left_out(self):
+        out = completion.script("bash", _suggesting_parser(
+            lambda: ["ok.org", *UNSAFE_WORDS]))
+        [line] = [ln for ln in out.splitlines() if "//--source)" in ln]
+        assert 'compgen -W "ok.org" --' in line
+
+    def test_search_source_accepts_any_value(self, parser):
+        args = parser.parse_args(["search", "q", "--source", "WWW.Example.ORG"])
+        assert args.source == "WWW.Example.ORG"
+
+    def test_search_source_words_are_every_supported_source(self, parser):
+        out = completion.script("bash", parser)
+        assert " ".join(list_supported_sources()) in out
 
 
 @needs_bash
@@ -135,6 +188,50 @@ class TestBashCompletion:
     def test_non_value_option_word_is_left_alone(self, script):
         assert _complete(script, "list", "--js") == ["--json"]
         assert _complete(script, "--config-dir=/tmp", "") != []
+
+    def test_search_source_names(self, script):
+        reply = _complete(script, "search", "Blue Lock", "--source", "")
+        assert set(reply) == set(list_supported_sources())
+        assert not any(w.startswith("www.") for w in reply)
+
+    def test_search_source_default_and_non_default(self, script):
+        # A default-sweep source, a registered one that is never swept,
+        # and a single-manga template site are all valid --source values.
+        swept = compute_search_sources(_NoConfig())
+        assert "mangadex.org" in swept
+        assert "mangasee123.com" in BROKEN_SEARCH_SOURCES
+        template = sorted(TEMPLATE_SCRAPERS)[0].removeprefix("www.")
+        assert template not in swept
+        for source in ("mangadex.org", "mangasee123.com", template):
+            assert source in _complete(script, "search", "q", "--source",
+                                       source[:-1]), source
+
+    def test_search_source_prefix(self, script):
+        expected = {s for s in list_supported_sources() if s.startswith("mangadex")}
+        assert "mangadex.org" in expected
+        assert set(_complete(script, "search", "q", "--source", "mangadex")) == expected
+        # Option before the query, too.
+        assert set(_complete(script, "search", "--source", "mangadex")) == expected
+
+    def test_search_source_equals_forms(self, script):
+        expected = {s for s in list_supported_sources() if s.startswith("mangadex")}
+        assert set(_complete(script, "search", "q", "--source", "=",
+                             "mangadex")) == expected
+        assert set(_complete(script, "search", "q", "--source=mangadex")) == {
+            "--source=" + s for s in expected}
+
+    def test_search_source_unknown_prefix_offers_nothing(self, script):
+        assert _complete(script, "search", "q", "--source", "zz-no-such") == []
+
+    def test_unsafe_suggestions_are_not_offered(self):
+        script = completion.script("bash", _suggesting_parser(
+            lambda: ["ok.org", *UNSAFE_WORDS]))
+        assert _complete(script, "--source", "") == ["ok.org"]
+
+    def test_tracked_titles_are_not_completed(self, script):
+        # Titles are not completed (#260): TARGET falls back to bash's
+        # default, never to option names or other words.
+        assert _complete(script, "rm", "") == []
 
     def test_free_value_offers_no_words(self, script):
         # A title value falls back to bash's default (file names), never

@@ -422,7 +422,8 @@ python -m memanga doctor --json --check browsers --launch-browsers
 ### Shell completion
 
 `memanga completion bash` prints a bash completion script for commands,
-options and their choices. Load it from `~/.bashrc`:
+options, their choices and the source names for `search --source`. Load it
+from `~/.bashrc`:
 
 ```bash
 source <(memanga completion bash)
@@ -431,7 +432,11 @@ source <(memanga completion bash)
 Only bash is supported for now; zsh and fish have no script yet.
 
 The script completes the `memanga` command; regenerate it after
-upgrading so new commands and options show up.
+upgrading so new commands, options and sources show up.
+
+Tracked manga titles are not completed: the script is static and never
+reads your library or config, so nothing runs on TAB. Use `#N` from
+`memanga list` to name a manga quickly, e.g. `memanga rm '#3'`.
 
 ---
 

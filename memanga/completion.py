@@ -4,8 +4,13 @@
 is supported; SHELL stays an argument so other shells can be added once
 they can be tested. The script is built from the same argparse parser the CLI runs, so commands,
 aliases, options and choices can't drift from the real interface. The
-scripts only complete the command line's shape; nothing calls back into
-memanga on TAB.
+scripts only complete the command line's shape plus fixed word lists
+attached with `suggest()`; nothing calls back into memanga on TAB.
+
+Tracked manga titles are not completed (issue #260): that needs a
+callback into memanga on every TAB, the --config-dir rules redone in the
+shell, and quoting for free-form titles that `compgen -W` would expand.
+`#N` from `memanga list` is the short way to name a manga.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from __future__ import annotations
 import argparse
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 SHELLS = ("bash",)
 PROG = "memanga"
@@ -42,8 +47,29 @@ class _Node:
     children: List["_Node"] = field(default_factory=list)
 
 
+def suggest(action: argparse.Action,
+            words: Callable[[], Iterable[str]]) -> argparse.Action:
+    """Complete ``action``'s value with ``words()`` (issue #260).
+
+    Unlike argparse choices, the words don't limit what the option
+    accepts. ``words`` is only called when a script is generated, so the
+    CLI's start-up cost is unchanged. Words that aren't plain tokens are
+    left out of the script.
+    """
+    action.completion_words = words
+    return action
+
+
 def _words(values) -> List[str]:
     return [str(v) for v in values or () if _SAFE_WORD.fullmatch(str(v))]
+
+
+def _suggestions(action: argparse.Action) -> List[str]:
+    """``action``'s choices, or the words given to `suggest()`."""
+    if action.choices:
+        return _words(action.choices)
+    words = getattr(action, "completion_words", None)
+    return _words(words()) if words else []
 
 
 def _node(parser: argparse.ArgumentParser, name: str = "",
@@ -59,12 +85,12 @@ def _node(parser: argparse.ArgumentParser, name: str = "",
             node.options.append(_Option(
                 strings=_words(action.option_strings),
                 takes_value=action.nargs != 0,
-                choices=_words(action.choices),
+                choices=_suggestions(action),
                 directory=metavar == "DIR",
             ))
         else:
             node.has_positionals = True
-            node.choices.extend(_words(action.choices))
+            node.choices.extend(_suggestions(action))
     return node
 
 

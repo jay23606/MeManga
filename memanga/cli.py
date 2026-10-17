@@ -3177,7 +3177,12 @@ Examples:
     p_search = subparsers.add_parser("search", help="Search sources for a manga by title")
     p_search.add_argument("query", help="Manga title to search for")
     p_search.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    p_search.add_argument("--source", help="Search a single source only (e.g. mangadex.org)")
+    # Completion offers every supported source (`memanga sources`); the
+    # value stays free-form, e.g. www. or a subdomain (issue #260).
+    completion.suggest(
+        p_search.add_argument("--source", help="Search a single source only (e.g. mangadex.org)"),
+        get_supported_sources,
+    )
     p_search.add_argument("--limit", type=int, metavar="N", help="Cap results per source")
     p_search.add_argument("--add", type=int, metavar="N", help="Add result #N without prompting")
     p_search.add_argument("--status", choices=VALID_STATUSES, help="Status for the added manga (with --add or the prompt)")
