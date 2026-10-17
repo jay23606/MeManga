@@ -291,7 +291,7 @@ For a host cron job, run Compose from the repository directory:
 | `set TITLE STATUS` | `reading` / `on-hold` / `dropped` / `completed` |
 | `remove TITLE` (`rm`) [--yes] [--purge-history] [--keep-files \| --delete-files] | Drop a manga from tracking. History and files are kept unless `--purge-history` / `--delete-files` is given; `--yes` only skips the confirmation |
 | `update TITLE …` (`edit`) | Edit URL, backup (`--backup` / `--no-backup`), fallback days, title, status, mode or Kindle toggle; only the given fields change |
-| `check [-t TITLE] [--dry-run \| --download] [--from N] [--safe]` | Look for new chapters. `--dry-run` only lists them; `--download` (aliases `--auto`, `--yes`) downloads without prompting; otherwise it asks on a terminal and downloads nothing without one |
+| `check [TITLE] [--dry-run \| --download] [--from N] [--safe]` | Look for new chapters (`TITLE` can also be given as `-t TITLE`). `--dry-run` only lists them; `--download` (aliases `--auto`, `--yes`) downloads without prompting; otherwise it asks on a terminal and downloads nothing without one |
 | `failed [list [TARGET]] [--json]` / `failed retry [TARGET]` / `failed clear [TARGET]` | List, re-download or forget failed and partial chapters; TARGET goes after the action and is a title or `#N`, matched like `check -t`. `--retry` / `--clear` are aliases of `retry` / `clear` |
 | `status [--json]` | Show config dir, download dir, manga count, last check time |
 | `doctor [--json] [--check NAME] [--smtp] [--launch-browsers]` | Diagnose install, paths, browsers, email, keyring, scheduler and source health |
@@ -303,10 +303,12 @@ For a host cron job, run Compose from the repository directory:
 | `sources` | List all 319 supported domains, marking which ones are healthy |
 | `export FILE` / `import FILE` | Back up or restore your library + state as JSON (`-` for stdout/stdin; `import --dry-run` previews, `--replace` asks unless `--yes`) |
 | `tui` | Launch the in-terminal interactive view |
+| `completion bash` | Print a bash completion script (see [Shell completion](#shell-completion)) |
 
 TITLE matches an exact title (any case) first, then a partial title that fits only one manga; an ambiguous partial title is refused, and a bare number must match a title exactly. Use `"#N"` to pick the Nth manga from `list`.
 
-Run any subcommand with `--help` for full flags.
+Run any subcommand with `--help` for full flags, and `memanga --version`
+to print the installed version.
 
 ## Common recipes
 
@@ -416,6 +418,20 @@ stderr. Exit codes are listed in
 python -m memanga failed --json | jq -r '.chapters[] | "\(.title) #\(.chapter)"'
 python -m memanga doctor --json --check browsers --launch-browsers
 ```
+
+### Shell completion
+
+`memanga completion bash` prints a bash completion script for commands,
+options and their choices. Load it from `~/.bashrc`:
+
+```bash
+source <(memanga completion bash)
+```
+
+Only bash is supported for now; zsh and fish have no script yet.
+
+The script completes the `memanga` command; regenerate it after
+upgrading so new commands and options show up.
 
 ---
 

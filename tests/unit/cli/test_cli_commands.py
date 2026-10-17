@@ -83,6 +83,91 @@ class TestTopLevel:
         assert rc != 0
 
 
+class TestCliIdentity:
+    """--version and a stable program name (#248)."""
+
+    @pytest.mark.parametrize("flag", ["--version", "-V"])
+    def test_version(self, run_cli, capsys, flag):
+        from memanga import __version__
+        assert run_cli(flag) == 0
+        assert capsys.readouterr().out == f"memanga {__version__}\n"
+
+    def test_version_needs_no_readable_config(self, run_cli, isolated_home,
+                                              capsys):
+        cfg = isolated_home / ".config" / "memanga" / "config.yaml"
+        cfg.write_text("manga: [unclosed\n", encoding="utf-8")
+        assert run_cli("--version") == 0
+        assert capsys.readouterr().out.startswith("memanga ")
+
+    @pytest.mark.parametrize("argv0", [
+        "/usr/lib/python3/site-packages/memanga/__main__.py", "__main__.py",
+    ])
+    def test_errors_use_memanga_prog_under_python_m(self, monkeypatch,
+                                                     isolated_home, capsys,
+                                                     argv0):
+        from memanga import cli
+        monkeypatch.setattr(sys, "argv", [argv0, "not-a-real-command"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert err.startswith("usage: memanga ")
+        assert "memanga: error:" in err
+        assert "__main__" not in err
+
+    def test_subcommand_help_uses_memanga_prog(self, monkeypatch,
+                                               isolated_home, capsys):
+        from memanga import cli
+        monkeypatch.setattr(sys, "argv", ["__main__.py", "check", "--help"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.startswith("usage: memanga check ")
+
+
+class TestCompletionCommand:
+    """`memanga completion SHELL` (#248)."""
+
+    def test_prints_script_with_every_command(self, run_cli, capsys):
+        assert run_cli("completion", "bash") == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        tokens = set(captured.out.translate(str.maketrans('"|)', "   ")).split())
+        for name in ("list", "ls", "add", "set", "remove", "rm", "update",
+                     "edit", "check", "status", "config", "cron", "sources",
+                     "search", "export", "import", "failed", "doctor", "tui",
+                     "completion"):
+            assert name in tokens, name
+        for option in ("--config-dir", "--version"):
+            assert option in tokens
+
+    def test_bash_registers_memanga(self, run_cli, capsys):
+        assert run_cli("completion", "bash") == 0
+        out = capsys.readouterr().out
+        assert out.rstrip().endswith("complete -o default -F _memanga memanga")
+
+    @pytest.mark.parametrize("shell", ["zsh", "fish", "powershell"])
+    def test_unsupported_shell_is_usage_error(self, run_cli, capsys, shell):
+        assert run_cli("completion", shell) == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+    def test_works_with_broken_config_and_writes_nothing(self, run_cli,
+                                                         isolated_home, capsys):
+        root = isolated_home / ".config" / "memanga"
+        cfg = root / "config.yaml"
+        cfg.write_text("manga: [unclosed\n", encoding="utf-8")
+        before = sorted(p.name for p in root.iterdir())
+        assert run_cli("completion", "bash") == 0
+        assert "_memanga" in capsys.readouterr().out
+        assert sorted(p.name for p in root.iterdir()) == before
+        assert cfg.read_text(encoding="utf-8") == "manga: [unclosed\n"
+
+    def test_cli_only_image_omits_gui(self, run_cli, monkeypatch, capsys):
+        monkeypatch.setenv("MEMANGA_CLI_ONLY", "1")
+        assert run_cli("completion", "bash") == 0
+        assert "--gui" not in capsys.readouterr().out
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # `list` / `ls` — show the library
 # ─────────────────────────────────────────────────────────────────────────
@@ -3599,6 +3684,7 @@ class TestExitCodes:
         ("set", "missing-title", "completed"),
         ("update", "missing-title", "--title", "New"),
         ("check", "-t", "missing-title"),
+        ("check", "missing-title"),
     ])
     def test_not_found_exits_1_on_stderr(self, run_cli, config, capsys, argv):
         self._seed(config, "Tracked")
@@ -3611,6 +3697,7 @@ class TestExitCodes:
         ("set", "missing-title", "completed"),
         ("update", "missing-title", "--title", "New"),
         ("check", "-t", "missing-title"),
+        ("check", "missing-title"),
     ])
     def test_not_found_on_empty_library_exits_1(self, run_cli, capsys, argv):
         assert run_cli(*argv) == 1
@@ -3990,6 +4077,25 @@ class TestCheckModes:
         assert reloaded.get("last_check") is not None
         assert reloaded.get_check_history()[-1]["downloaded"] == 4
         assert reloaded.get_check_history()[-1]["new_chapters"] == 4
+
+    @pytest.mark.parametrize("argv", [
+        ("Alpha",), ("-t", "Alpha"), ("--title", "Alpha"), ("#1",),
+        ("Alpha", "-t", "Alpha"),
+    ])
+    def test_positional_target_matches_title_flag(self, run_cli, seeded, calls,
+                                                  monkeypatch, argv):
+        """#248: `check TARGET` is the same as `check -t TARGET`."""
+        self._stdin(monkeypatch, False)
+        assert run_cli("check", *argv, "--download") == 0
+        assert calls["download"] == [("Alpha", "5"), ("Alpha", "6")]
+
+    def test_positional_and_title_flag_must_agree(self, run_cli, seeded, calls,
+                                                  monkeypatch, capsys):
+        self._stdin(monkeypatch, False)
+        capsys.readouterr()
+        assert run_cli("check", "Alpha", "-t", "Beta", "--download") == 2
+        assert "give the target once" in capsys.readouterr().err
+        assert calls["download"] == []
 
     def test_default_on_terminal_still_prompts(self, run_cli, seeded, calls,
                                                monkeypatch):

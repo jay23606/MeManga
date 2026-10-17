@@ -78,6 +78,9 @@ OutputFormat = Literal["pdf", "epub", "cbz", "zip", "jpg", "png", "webp"]
 # Default days to wait before falling back to backup source
 DEFAULT_FALLBACK_DELAY_DAYS = 2
 
+# Default number of times a failed page download is retried
+DEFAULT_PAGE_RETRIES = 3
+
 # How long a post-processing command may run before it's killed (seconds).
 POST_PROCESSING_TIMEOUT = 600
 
@@ -557,7 +560,7 @@ def download_chapter(
     progress_callback=None,
     naming_template: Optional[str] = None,
     cancel_event=None,
-    max_retries: int = 3,
+    max_retries: int = DEFAULT_PAGE_RETRIES,
     post_processing: Optional[Dict[str, Any]] = None,
     allow_partial: bool = False,
     partial_threshold: float = 0.0,

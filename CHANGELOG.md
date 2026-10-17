@@ -7,6 +7,12 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #248 `memanga --version` (also `-V`) prints the installed version, and
+  `memanga completion bash` prints a bash completion script.
+  Help and error messages always name the program `memanga`, also under
+  `python -m memanga`. `check` takes its target as a positional argument
+  like `set`, `remove` and `update` (`check "Blue Lock"`); `-t TITLE`
+  still works.
 - #354 `memanga export -` writes the backup JSON to stdout and
   `memanga import -` reads it from stdin. `import --dry-run` checks the
   backup and lists what would be added or skipped without changing
