@@ -18,6 +18,7 @@ from memanga.backup import (
     merge_backup_state,
     merge_manga_state,
     validate_backup,
+    validate_backup_contents,
     _MIGRATIONS,
 )
 
@@ -193,3 +194,87 @@ class TestMergeMangaState:
         )
 
         assert merged["last_chapter"] == "10"
+
+
+class TestValidateBackupContents:
+    """Issue #354: payload shape is checked before an import writes."""
+
+    def test_valid_payload_returns_manga_and_state(self):
+        manga = [{"title": "A", "url": "u"}]
+        state = {"A": {"downloaded": ["1"]}}
+        assert validate_backup_contents(
+            {"version": 1, "manga": manga, "state": state}) == (manga, state)
+
+    @pytest.mark.parametrize("state", [None, "missing"])
+    def test_absent_state_is_empty(self, state):
+        data = {"version": 1, "manga": []}
+        if state != "missing":
+            data["state"] = state
+        assert validate_backup_contents(data) == ([], {})
+
+    @pytest.mark.parametrize("data, match", [
+        ({"version": 1}, "missing 'manga' key"),
+        ({"version": 1, "manga": {}}, "manga must be a list"),
+        ({"version": 1, "manga": [None]}, "entry 1 must be an object"),
+        ({"version": 1, "manga": [{}]}, "entry 1 has no title"),
+        ({"version": 1, "manga": [{"title": ""}]}, "entry 1 has no title"),
+        ({"version": 1, "manga": [{"title": ["A"]}]}, "entry 1 has no title"),
+        ({"version": 1, "manga": [], "state": []}, "state must be an object"),
+        ({"version": 1, "manga": [], "state": {"A": "x"}}, "state for 'A'"),
+    ])
+    def test_malformed_payload_rejected(self, data, match):
+        with pytest.raises(BackupVersionError, match=match):
+            validate_backup_contents(data)
+
+    @pytest.mark.parametrize("field, value", [
+        ("downloaded", 5),
+        ("downloaded", "12"),
+        ("downloaded", [True]),
+        ("read_chapters", [None]),
+        ("external_chapters", {}),
+        ("available_chapters", [1]),
+        ("failed_chapters", []),
+        ("pending_backup", "x"),
+        ("partial_chapters", 1),
+        ("saved_chapter_groups", []),
+        ("reading_progress", []),
+        ("reader_positions", []),
+        ("reader_positions", "1"),
+        ("reader_positions", None),
+        ("new_chapters_available", "3"),
+        ("new_chapters_available", True),
+        ("last_chapter", {}),
+        ("last_updated", 1),
+        ("created", []),
+    ])
+    def test_malformed_nested_state_field_rejected(self, field, value):
+        data = {"version": 1, "manga": [], "state": {"A": {field: value}}}
+        with pytest.raises(BackupVersionError, match=f"state for 'A': {field}"):
+            validate_backup_contents(data)
+
+    def test_none_and_unknown_state_fields_pass(self):
+        entry = {key: None for key in (
+            "downloaded", "available_chapters", "failed_chapters",
+            "reading_progress", "new_chapters_available", "last_chapter",
+            "last_updated", "created")}
+        entry["future_field"] = object()
+        data = {"version": 1, "manga": [], "state": {"A": entry}}
+        assert validate_backup_contents(data)[1] == {"A": entry}
+
+    def test_state_as_written_by_state_passes(self):
+        entry = {
+            "downloaded": ["1", 2, 2.5], "read_chapters": [],
+            "external_chapters": ["3"],
+            "available_chapters": [{"number": "1", "url": "u"}],
+            "failed_chapters": {"4": {"error": "e", "attempts": 1}},
+            "pending_backup": {}, "partial_chapters": {},
+            "saved_chapter_groups": {},
+            "reading_progress": {"last_chapter": None, "last_read": None},
+            "reader_positions": {"2": {"mode": "paged", "page_index": 3,
+                                       "updated_at": "2026-01-01T00:00:00"}},
+            "new_chapters_available": 0, "last_chapter": "2.5",
+            "last_updated": "2026-01-01T00:00:00",
+            "created": "2026-01-01T00:00:00",
+        }
+        data = {"version": 1, "manga": [], "state": {"A": entry}}
+        assert validate_backup_contents(data)[1] == {"A": entry}

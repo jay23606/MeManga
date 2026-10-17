@@ -12,7 +12,7 @@ show :class:`BackupVersionError` messages to the user as-is, so keep
 them short and self-explanatory.
 """
 
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 EXPORT_VERSION = 1
 
@@ -62,6 +62,95 @@ def validate_backup(data: Any) -> dict:
         version += 1
 
     return data
+
+
+def validate_backup_contents(data: dict) -> Tuple[List[dict], Dict[str, dict]]:
+    """Check a version-validated payload's ``manga`` and ``state`` shapes.
+
+    Issue #354: the CLI import checks the whole payload before it writes
+    anything, so a malformed file is rejected instead of crashing halfway
+    through or landing in config.yaml as-is. Returns ``(manga, state)``;
+    raises :class:`BackupVersionError` with a user-facing message.
+    """
+    if "manga" not in data:
+        raise BackupVersionError("Invalid backup: missing 'manga' key")
+    manga = data["manga"]
+    if not isinstance(manga, list):
+        raise BackupVersionError("Invalid backup: manga must be a list")
+    for index, entry in enumerate(manga, 1):
+        if not isinstance(entry, dict):
+            raise BackupVersionError(
+                f"Invalid backup: manga entry {index} must be an object"
+            )
+        title = entry.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise BackupVersionError(
+                f"Invalid backup: manga entry {index} has no title"
+            )
+
+    manga_state = data.get("state", {})
+    if manga_state is None:
+        manga_state = {}
+    if not isinstance(manga_state, dict):
+        raise BackupVersionError("Invalid backup: state must be an object")
+    for title, entry in manga_state.items():
+        if not isinstance(entry, dict):
+            raise BackupVersionError(
+                f"Invalid backup: state for {title!r} must be an object"
+            )
+        for key, value in entry.items():
+            check = _STATE_FIELD_CHECKS.get(key)
+            if check is None or (value is None and key not in _NON_NULL_STATE_FIELDS):
+                continue
+            expected, ok = check
+            if not ok(value):
+                raise BackupVersionError(
+                    f"Invalid backup: state for {title!r}: {key} must be {expected}"
+                )
+
+    return manga, manga_state
+
+
+def _is_chapter_label(value: Any) -> bool:
+    return isinstance(value, (str, int, float)) and not isinstance(value, bool)
+
+
+def _is_label_list(value: Any) -> bool:
+    return isinstance(value, list) and all(_is_chapter_label(v) for v in value)
+
+
+def _is_record_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, dict) for v in value)
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+# Per-manga state fields that merge_manga_state and the State readers
+# consume, with the shape State itself writes. ``None`` is accepted
+# (fresh entries store it) except for _NON_NULL_STATE_FIELDS; unknown
+# keys pass through as-is.
+_STATE_FIELD_CHECKS: Dict[str, Tuple[str, Callable[[Any], bool]]] = {
+    "downloaded": ("a list of chapter numbers", _is_label_list),
+    "read_chapters": ("a list of chapter numbers", _is_label_list),
+    "external_chapters": ("a list of chapter numbers", _is_label_list),
+    "available_chapters": ("a list of objects", _is_record_list),
+    "failed_chapters": ("an object", lambda v: isinstance(v, dict)),
+    "pending_backup": ("an object", lambda v: isinstance(v, dict)),
+    "partial_chapters": ("an object", lambda v: isinstance(v, dict)),
+    "saved_chapter_groups": ("an object", lambda v: isinstance(v, dict)),
+    "reading_progress": ("an object", lambda v: isinstance(v, dict)),
+    "reader_positions": ("an object", lambda v: isinstance(v, dict)),
+    "new_chapters_available": ("a whole number", _is_count),
+    "last_chapter": ("a chapter number", _is_chapter_label),
+    "last_updated": ("a date string", lambda v: isinstance(v, str)),
+    "created": ("a date string", lambda v: isinstance(v, str)),
+}
+
+# State never stores these as null, and its readers call ``.get`` on
+# them directly (State.get_reader_position), so null is malformed too.
+_NON_NULL_STATE_FIELDS = frozenset({"reader_positions"})
 
 
 def _chapter_sort_key(value: Any):

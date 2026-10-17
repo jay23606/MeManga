@@ -1103,6 +1103,12 @@ Saves to `memanga_export.json` by default. Specify a custom filename:
 run export my_backup.json
 ```
 
+Use `-` to write the JSON to stdout instead, for piping or redirecting:
+
+```bash
+run export - > backup.json
+```
+
 ### Import into another machine
 
 Copy the export file to the new machine, then:
@@ -1113,10 +1119,28 @@ run import memanga_export.json
 
 This **merges** with your existing data — duplicates are skipped and download histories are combined.
 
-To **replace** all data instead:
+Use `-` to read the backup from stdin, and `--dry-run` to check the file and
+see what would be added or skipped without changing anything:
+
+```bash
+run import memanga_export.json --dry-run
+cat memanga_export.json | run import -
+```
+
+The whole file is checked before anything is written; a malformed or
+unsupported backup is rejected and your library is left as it was.
+
+To **replace** all data instead (asks for confirmation first):
 
 ```bash
 run import memanga_export.json --replace
+```
+
+Scripts, pipes and stdin imports cannot answer the prompt, so they must pass
+`--yes` to replace:
+
+```bash
+run import - --replace --yes < memanga_export.json
 ```
 
 ---
@@ -1168,9 +1192,10 @@ run import memanga_export.json --replace
 | `run cron install --time 07:30` | Set custom check time |
 | `run cron status` | Check if scheduling is active |
 | `run cron remove` | Remove scheduled checks |
-| `run export` | Export manga list to JSON |
-| `run import FILE` | Import manga list from JSON |
-| `run import FILE --replace` | Import and replace all data |
+| `run export [FILE\|-]` | Export manga list to JSON (`-` = stdout) |
+| `run import FILE\|-` | Import manga list from JSON (`-` = stdin) |
+| `run import FILE --dry-run` | Check a backup and show what would change |
+| `run import FILE --replace [--yes]` | Import and replace all data (asks unless `--yes`) |
 
 ### JSON output
 

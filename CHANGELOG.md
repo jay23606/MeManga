@@ -7,6 +7,10 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #354 `memanga export -` writes the backup JSON to stdout and
+  `memanga import -` reads it from stdin. `import --dry-run` checks the
+  backup and lists what would be added or skipped without changing
+  anything. File paths work as before.
 - #353 `memanga config` gains `show [--json]`, `get KEY`, `set KEY VALUE`,
   `path`, `edit` and `email [--test]` for scripts, Docker and support.
   `get` prints only the value, `set` checks the key and value before
@@ -53,6 +57,13 @@ All notable changes are recorded here. Format loosely follows
   as aliases of `retry`/`clear`.
 
 ### Changed
+- #354 `import --replace` asks for confirmation before replacing the
+  library and download state. Non-interactive runs and stdin imports must
+  pass `--yes` (`-y`); without it they exit 1 and change nothing.
+- #354 `import` checks the whole backup before writing: invalid JSON, a
+  `manga` value that is not a list, entries without a title and
+  non-object state entries are rejected (exit 1) instead of crashing
+  midway or being written to config.yaml as-is.
 - #352 `failed` targets (TARGET or `-t`) are matched like `check -t`: `#N`
   from `memanga list`, an exact title, then a unique part of a title. A
   target that matches nothing or several manga is now an error (exit 1)
