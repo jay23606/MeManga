@@ -162,6 +162,27 @@ class TestCompletionCommand:
         assert sorted(p.name for p in root.iterdir()) == before
         assert cfg.read_text(encoding="utf-8") == "manga: [unclosed\n"
 
+    def test_script_never_includes_the_library(self, run_cli, isolated_home,
+                                               capsys):
+        # Static script (#260): no titles or library sources from
+        # config.yaml end up in it, and disabled sources stay offered.
+        assert run_cli("completion", "bash") == 0
+        empty = capsys.readouterr().out
+        domain = "private-host.example"
+        cfg = isolated_home / ".config" / "memanga" / "config.yaml"
+        cfg.write_text(
+            "manga:\n"
+            f"  - title: Private Title\n    source: {domain}\n"
+            f"    url: https://{domain}/manga/x\n"
+            "sources:\n  disabled: [mangadex.org]\n",
+            encoding="utf-8")
+        assert run_cli("completion", "bash") == 0
+        out = capsys.readouterr().out
+        assert out == empty
+        assert "Private Title" not in out
+        assert domain not in out
+        assert "mangadex.org" in out
+
     def test_cli_only_image_omits_gui(self, run_cli, monkeypatch, capsys):
         monkeypatch.setenv("MEMANGA_CLI_ONLY", "1")
         assert run_cli("completion", "bash") == 0
