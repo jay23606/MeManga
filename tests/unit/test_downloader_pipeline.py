@@ -70,6 +70,11 @@ class FakeState:
     def add_notification(self, *a, **k):
         self.notifications.append((a, k))
 
+    def set_chapter_groups(self, title, chapter, source, group_ids, group_names):
+        self.chapter_groups = getattr(self, "chapter_groups", {})
+        self.chapter_groups[(title, str(chapter))] = {
+            "source": source, "group_ids": group_ids, "group_names": group_names}
+
 
 @pytest.fixture
 def fake_state():
@@ -224,6 +229,13 @@ class TestFallbackDelayMechanic:
 
 
 class TestImagesToCbz:
+    def test_mangadex_archive_keeps_source_credit(self, jpg_paths, tmp_path):
+        from memanga.downloader import _images_to_cbz
+        out = tmp_path / "chapter.zip"
+        _images_to_cbz(jpg_paths, out, credit="MangaDex · Group A")
+        with zipfile.ZipFile(out) as zf:
+            assert zf.read("Source.txt").decode("utf-8") == "MangaDex · Group A\n"
+
     def test_creates_valid_zip(self, jpg_paths, tmp_path):
         from memanga.downloader import _images_to_cbz
         out = tmp_path / "ch.cbz"
@@ -293,6 +305,16 @@ class TestComicInfoXml:
         assert fields["Number"] == "5"
         assert fields["PageCount"] == "12"
         assert fields["Web"] == "https://x.test/c/5"
+
+    def test_mangadex_group_credit_in_comicinfo(self):
+        from memanga.downloader import _build_comicinfo_xml
+        from memanga.scrapers.base import Chapter
+        chapter = Chapter(number="1", url="https://mangadex.org/chapter/abc")
+        chapter.group_names = ["Group A", "Group B"]
+        fields = self._parse(_build_comicinfo_xml(
+            {"title": "Example"}, chapter, page_count=2))
+        assert fields["Translator"] == "Group A, Group B"
+        assert "Writer" not in fields
 
     def test_optional_fields_written_when_available(self):
         from memanga.downloader import _build_comicinfo_xml
@@ -364,6 +386,14 @@ class TestImagesToPdf:
         # PDF magic header
         assert out.read_bytes()[:4] == b"%PDF"
 
+    def test_mangadex_credit_in_pdf_author(self, jpg_paths, tmp_path):
+        pikepdf = pytest.importorskip("pikepdf")
+        from memanga.downloader import _images_to_pdf
+        out = tmp_path / "ch.pdf"
+        _images_to_pdf(jpg_paths, out, credit="MangaDex · Group A")
+        with pikepdf.open(out) as pdf:
+            assert str(pdf.docinfo["/Author"]) == "MangaDex · Group A"
+
 
 _OCF = "urn:oasis:names:tc:opendocument:xmlns:container"
 _OPF = "http://www.idpf.org/2007/opf"
@@ -371,6 +401,16 @@ _DC = "http://purl.org/dc/elements/1.1/"
 
 
 class TestImagesToEpub:
+    def test_mangadex_credit_in_epub_metadata(self, jpg_paths, tmp_path):
+        from memanga.downloader import _images_to_epub
+        out = tmp_path / "chapter.epub"
+        _images_to_epub(jpg_paths, out, "Example", "1",
+                        credit="MangaDex · Group A")
+        with zipfile.ZipFile(out) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+        meta = opf.find(f"{{{_OPF}}}metadata")
+        assert meta.find(f"{{{_DC}}}contributor").text == "MangaDex · Group A"
+
     def test_creates_valid_epub(self, jpg_paths, tmp_path):
         from memanga.downloader import _images_to_epub
         out = tmp_path / "ch.epub"
@@ -626,6 +666,77 @@ def _partial_chapter():
         number="71", title="", url="https://cdn.test/c/71",
         source="cdn.test", source_url="https://cdn.test/c/71",
         is_backup=False)
+
+
+class TestMangaDexCredit:
+    def test_rebuilt_chapter_takes_group_credit_from_cached_list(
+            self, tmp_path, fake_state, monkeypatch):
+        """GUI-rebuilt chapters have no group names; the cached chapter
+        list from the last check supplies the credit."""
+        import memanga.downloader as dl
+        url = "https://mangadex.org/chapter/abc"
+        fake_state.get_available_chapters = lambda title: [
+            {"number": "1", "url": url, "group_names": ["Group A"]}]
+        monkeypatch.setattr(dl, "get_scraper", lambda d: _PartialScraper(2, set()))
+        chapter = types.SimpleNamespace(number="1", title="", url=url)
+        manga = {"title": "Example", "url": "https://mangadex.org/title/x",
+                 "source": "mangadex.org"}
+        out = dl.download_chapter(manga, chapter, tmp_path, "zip", fake_state,
+                                  max_retries=0)
+        with zipfile.ZipFile(out) as zf:
+            assert zf.read("Source.txt").decode("utf-8") == "MangaDex · Group A\n"
+
+    def test_saved_chapter_records_its_group(self, tmp_path, fake_state, monkeypatch):
+        """The group is stored with the saved chapter, apart from the
+        cached chapter list a later check replaces (#400)."""
+        import memanga.downloader as dl
+        url = "https://mangadex.org/chapter/abc"
+        fake_state.get_available_chapters = lambda title: [
+            {"number": "1", "url": url, "group_ids": ["g-a"],
+             "group_names": ["Group A"]}]
+        monkeypatch.setattr(dl, "get_scraper", lambda d: _PartialScraper(2, set()))
+        chapter = types.SimpleNamespace(number="1", title="", url=url)
+        manga = {"title": "Example", "url": "https://mangadex.org/title/x",
+                 "source": "mangadex.org"}
+        dl.download_chapter(manga, chapter, tmp_path, "zip", fake_state,
+                            max_retries=0)
+        assert fake_state.chapter_groups[("Example", "1")] == {
+            "source": "mangadex.org", "group_ids": ["g-a"],
+            "group_names": ["Group A"]}
+
+    def test_backup_lookup_skips_removed_group_upload(self, monkeypatch):
+        """With the block applied before selection, an allowed duplicate
+        is picked instead of the removed group's upload."""
+        import memanga.downloader as dl
+        from memanga.scrapers.base import Chapter
+        from memanga.scrapers.mangadex import MangaDexScraper
+
+        class FakeMangaDex(MangaDexScraper):
+            def get_chapters(self, url):
+                uploads = [("g-removed", "removed"), ("g-ok", "allowed")]
+                out = []
+                for group, name in uploads:
+                    if group in self.removed_group_ids:
+                        continue
+                    ch = Chapter(number="5", url=f"https://mangadex.org/chapter/{name}")
+                    ch.group_ids = [group]
+                    out.append(ch)
+                return out
+
+        class FakeConfig:
+            def __init__(self, config_dir=None):
+                pass
+
+            def get(self, key, default=None):
+                return {"mangadex.removed_group_ids": ["g-removed"]}.get(key, default)
+
+        monkeypatch.setattr("memanga.config.Config", FakeConfig)
+        monkeypatch.setattr(dl, "get_scraper", lambda d: FakeMangaDex())
+        manga = {"title": "Example", "sources": [
+            {"source": "mock.test", "url": "https://mock.test/x"},
+            {"source": "mangadex.org", "url": "https://mangadex.org/title/x"}]}
+        found = dl._find_chapter_on_backup(manga, "5")
+        assert found.url == "https://mangadex.org/chapter/allowed"
 
 
 class TestPartialChapterTolerance:

@@ -14,6 +14,16 @@ class TestConfigBasics:
         config.set("delivery.output_format", "epub")
         assert config.get("delivery.output_format") == "epub"
 
+    def test_mangadex_original_is_default_and_choice_persists(self, config):
+        assert config.get("mangadex.data_saver") is False
+        assert config.get("mangadex.removed_group_ids") == []
+        config.set("mangadex.data_saver", True)
+        config.set("mangadex.removed_group_ids", ["group-1"])
+        config.save()
+        config.reload()
+        assert config.get("mangadex.data_saver") is True
+        assert config.get("mangadex.removed_group_ids") == ["group-1"]
+
     def test_dotted_key_creates_nested(self, config):
         config.set("a.b.c", 42)
         assert config.get("a.b.c") == 42

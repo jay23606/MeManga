@@ -26,6 +26,7 @@ them to your Kindle.
 - [Downloading From a Specific Chapter](#downloading-from-a-specific-chapter)
 - [Managing Status](#managing-status)
 - [Changing Output Format](#changing-output-format)
+- [MangaDex Image Quality and Group Removal](#mangadex-image-quality-and-group-removal)
 - [Post-Processing After Download](#post-processing-after-download)
 - [Setting Up Kindle Email](#setting-up-kindle-email)
 - [Backup Sources](#backup-sources)
@@ -705,6 +706,30 @@ Download one manga in CBZ:
 ```bash
 run check -t "One Piece" --format cbz --download
 ```
+
+---
+
+## MangaDex Image Quality and Group Removal
+
+MangaDex chapters use original-quality images by default. To download smaller
+images for an e-reader, run `run config --mangadex-quality data-saver`, or
+choose **Settings → General → MangaDex Image Quality** in the desktop app.
+Use `run config --mangadex-quality original` to restore the default. Existing
+files do not change.
+
+The built-in reader displays MangaDex and the scanlation group credited by
+MangaDex. Saved chapters also carry that credit in their metadata, or in
+`Source.txt` for ZIP, CBZ and image folders.
+
+Group leaders who want their chapters removed can open an issue with the
+group's MangaDex link. Accepted group IDs are added to a future release; none
+are built in yet. To block a group yourself,
+copy the UUID from its MangaDex group page and run
+`run config --mangadex-remove-group GROUP_ID`. Checks, downloads and the
+built-in reader then skip that group's chapters. Delete chapters already
+downloaded from it, including e-reader copies; MeManga does not delete saved
+files. Restart the desktop app after changing this setting
+from the CLI. Blocked IDs appear in `run config --show`.
 
 ---
 

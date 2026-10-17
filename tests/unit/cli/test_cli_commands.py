@@ -936,6 +936,21 @@ class TestConfigCommand:
         assert config.get("partial_chapters.enabled") is True
         assert float(config.get("partial_chapters.threshold_percent")) == 5.0
 
+    def test_mangadex_quality_and_removed_group_persist(self, run_cli, config):
+        group = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b"
+        assert run_cli("config", "--mangadex-quality", "data-saver",
+                       "--mangadex-remove-group", group.upper()) == 0
+        assert config.get("mangadex.data_saver") is True
+        assert config.get("mangadex.removed_group_ids") == [group]
+        assert run_cli("config", "--mangadex-remove-group", group) == 0
+        assert config.get("mangadex.removed_group_ids") == [group]
+        assert run_cli("config", "--mangadex-quality", "original") == 0
+        assert config.get("mangadex.data_saver") is False
+
+    def test_mangadex_remove_group_rejects_non_uuid(self, run_cli, config):
+        assert run_cli("config", "--mangadex-remove-group", "Group Name") != 0
+        assert config.get("mangadex.removed_group_ids") == []
+
     def test_config_partial_off_persists(self, run_cli, config):
         run_cli("config", "--partial", "on")
         rc = run_cli("config", "--partial", "off")

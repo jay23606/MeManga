@@ -337,6 +337,15 @@ class SettingsPage(BasePage):
         format_row.addWidget(hint, 1)
         f.addLayout(format_row)
 
+        self._section(f, "MangaDex Image Quality")
+        self._mangadex_quality = QComboBox()
+        self._mangadex_quality.addItem("Original", False)
+        self._mangadex_quality.addItem("Data saver (smaller downloads)", True)
+        self._mangadex_quality.setCurrentIndex(
+            1 if self.app.config.get("mangadex.data_saver", False) else 0)
+        self._mangadex_quality.setMaximumWidth(280)
+        f.addWidget(self._mangadex_quality)
+
         # Concurrent downloads slider (1..8). JumpSlider so a groove
         # click sets the clicked value instead of page-stepping to an
         # extreme (#46).
@@ -873,6 +882,7 @@ class SettingsPage(BasePage):
         cfg.set("delivery.mode", mode)
         cfg.set("delivery.download_dir", self._dir_entry.text().strip())
         cfg.set("delivery.output_format", self._format_combo.currentText())
+        cfg.set("mangadex.data_saver", self._mangadex_quality.currentData())
         cfg.set("delivery.delete_after_send", self._delete_after_check.isChecked())
         # Concurrent downloads (slider)
         if hasattr(self, "_concurrent_slider"):
@@ -948,9 +958,12 @@ class SettingsPage(BasePage):
     def _reset_to_defaults(self):
         cfg = self.app.config
         defaults = cfg._default_config()
+        # A reset restores preferences, not the user's group block list.
+        removed_groups = list(cfg.get("mangadex.removed_group_ids", []) or [])
         for section in ("delivery", "email", "cron", "gui", "partial_chapters",
-                        "reader"):
+                        "reader", "mangadex"):
             cfg.set(section, defaults[section])
+        cfg.set("mangadex.removed_group_ids", removed_groups)
         cfg.save()
         self._load_config_into_widgets()
         Toast(self, "Settings reset to defaults", kind="success")
@@ -965,6 +978,8 @@ class SettingsPage(BasePage):
 
         self._dir_entry.setText(str(cfg.download_dir))
         self._format_combo.setCurrentText(cfg.output_format)
+        self._mangadex_quality.setCurrentIndex(
+            1 if cfg.get("mangadex.data_saver", False) else 0)
         self._concurrent_slider.setValue(
             max(1, min(8, int(cfg.get("gui.max_concurrent_downloads", 2))))
         )

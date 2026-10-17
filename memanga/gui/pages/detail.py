@@ -458,9 +458,13 @@ class DetailPage(BasePage):
         # without metadata are still rendered (just no Download button is
         # needed because they're already on disk).
         merged: dict = {}
+        # Hide cached MangaDex entries from groups that asked for removal.
+        from ...scrapers.mangadex import removed_group_ids
+        removed_groups = removed_group_ids(self.app.config)
+        saved_groups = self.app.app_state.get_chapter_groups
         for entry in available:
             num = str(entry.get("number", ""))
-            if num:
+            if num and not (removed_groups & set(entry.get("group_ids", []))):
                 merged[num] = entry
         for ch_num in downloaded:
             num = str(ch_num)
@@ -685,6 +689,9 @@ class DetailPage(BasePage):
                     f"Partial - {len(missing)}/{total} page(s) missing"
                     if total else "Partial - missing pages"
                 )
+            elif is_dl and removed_groups & set(
+                    saved_groups(title, num).get("group_ids", [])):
+                sub_state = "Unavailable at the group's request"
             elif is_read:
                 sub_state = "Read"
             elif is_dl:
@@ -1170,6 +1177,8 @@ class DetailPage(BasePage):
         # Build a Chapter (then promote to ChapterWithSource for source routing)
         base = Chapter(number=number, title=ch_title, url=url, date=None)
         chapter = ChapterWithSource(base, source, source_url, is_backup=is_backup)
+        chapter.group_ids = ch_dict.get("group_ids", [])
+        chapter.group_names = ch_dict.get("group_names", [])
 
         # Optional Kindle delivery, same gating as the auto-queue path
         kindle_cfg = None

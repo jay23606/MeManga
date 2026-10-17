@@ -110,6 +110,19 @@ class ChapterWithSource(Chapter):
         self.source = source
         self.source_url = source_url
         self.is_backup = is_backup
+        self.group_ids = getattr(chapter, "group_ids", [])
+        self.group_names = getattr(chapter, "group_names", [])
+
+
+def _configure_mangadex(scraper, state=None):
+    """Apply the user's MangaDex choices to this scraper instance."""
+    from .config import Config
+    from .scrapers.mangadex import MangaDexScraper, removed_group_ids
+
+    if isinstance(scraper, MangaDexScraper):
+        config = Config(config_dir=state.config_dir if state else None)
+        scraper.data_saver = bool(config.get("mangadex.data_saver", False))
+        scraper.removed_group_ids = removed_group_ids(config)
 
 
 def _extract_source(url: str) -> str:
@@ -287,6 +300,7 @@ def check_for_updates(
 
         try:
             scraper = get_scraper(source)
+            _configure_mangadex(scraper, state)
             all_chapters = scraper.get_chapters(url)
             sources_checked += 1
         except ValueError as e:
@@ -505,6 +519,7 @@ def check_for_updates(
 def _find_chapter_on_backup(
     manga: Dict[str, Any],
     chapter_num_str: str,
+    state: Optional[State] = None,
 ) -> Optional["ChapterWithSource"]:
     """
     Find a chapter on backup sources.
@@ -520,6 +535,8 @@ def _find_chapter_on_backup(
         url = src["url"]
         try:
             scraper = get_scraper(source)
+            # Skip removed MangaDex groups so an allowed upload is picked.
+            _configure_mangadex(scraper, state)
             all_chapters = scraper.get_chapters(url)
         except Exception:
             continue
@@ -610,6 +627,7 @@ def download_chapter(
     # Get scraper
     try:
         scraper = get_scraper(source)
+        _configure_mangadex(scraper, state)
     except ValueError as e:
         raise DownloaderError(f"Unsupported source: {e}")
 
@@ -779,37 +797,54 @@ def download_chapter(
                     .replace("{chapter}", chapter_str)
                     .replace("{source}", source)
         )
+        credit = None
+        if source in ("mangadex.org", "api.mangadex.org"):
+            groups = getattr(chapter, "group_names", [])
+            if not groups and state is not None:
+                # Chapters rebuilt by the GUI (reader, queue) carry no group
+                # names; the cached chapter list from the last check does.
+                cached = next((c for c in state.get_available_chapters(title)
+                               if c.get("url") == chapter.url), {})
+                groups = cached.get("group_names", [])
+                chapter.group_names = groups
+                if not getattr(chapter, "group_ids", []):
+                    chapter.group_ids = cached.get("group_ids", [])
+            credit = "MangaDex" + (" · " + ", ".join(groups) if groups else "")
 
         if output_format == "epub":
             output_path = manga_dir / f"{base_name}.epub"
             try:
-                _images_to_epub(image_paths, output_path, title, chapter.number, cover_path)
+                _images_to_epub(image_paths, output_path, title, chapter.number,
+                                cover_path, credit=credit)
             except Exception as e:
                 raise DownloaderError(f"Failed to create EPUB: {e}")
         elif output_format == "cbz":
             output_path = manga_dir / f"{base_name}.cbz"
             try:
                 comicinfo_xml = _build_comicinfo_xml(manga, chapter, len(image_paths))
-                _images_to_cbz(image_paths, output_path, comicinfo_xml)
+                _images_to_cbz(image_paths, output_path, comicinfo_xml,
+                               credit=credit)
             except Exception as e:
                 raise DownloaderError(f"Failed to create CBZ: {e}")
         elif output_format == "zip":
             output_path = manga_dir / f"{base_name}.zip"
             try:
-                _images_to_cbz(image_paths, output_path)  # Reuse CBZ logic (same ZIP format)
+                _images_to_cbz(image_paths, output_path, credit=credit)
             except Exception as e:
                 raise DownloaderError(f"Failed to create ZIP: {e}")
         elif output_format in ("jpg", "png", "webp"):
             chapter_folder = manga_dir / f"Chapter {chapter_str}"
             try:
                 _images_to_folder(image_paths, chapter_folder, output_format)
+                if credit:
+                    (chapter_folder / "Source.txt").write_text(credit + "\n", encoding="utf-8")
             except Exception as e:
                 raise DownloaderError(f"Failed to save images: {e}")
             output_path = chapter_folder  # Return the directory path
         else:
             output_path = manga_dir / f"{base_name}.pdf"
             try:
-                _images_to_pdf(image_paths, output_path)
+                _images_to_pdf(image_paths, output_path, credit=credit)
             except Exception as e:
                 raise DownloaderError(f"Failed to create PDF: {e}")
 
@@ -824,6 +859,14 @@ def download_chapter(
             source=source,
             output_format=output_format,
         )
+
+        if credit is not None and state is not None:
+            # Survives later checks that drop this group's chapters (#400).
+            state.set_chapter_groups(
+                title, chapter.number, source,
+                getattr(chapter, "group_ids", []),
+                getattr(chapter, "group_names", []),
+            )
 
         return output_path
 
@@ -1134,6 +1177,7 @@ def _images_to_epub(
     title: str,
     chapter_num: str,
     cover_image_path: Optional[Path] = None,
+    credit: Optional[str] = None,
 ):
     """Convert images to a fixed-layout EPUB compatible with Kindle.
 
@@ -1212,6 +1256,7 @@ def _images_to_epub(
     manifest_xml = "\n    ".join(manifest)
     spine_xml = "\n    ".join(f'<itemref idref="{idref}"/>' for idref in spine)
     cover_meta = '\n    <meta name="cover" content="cover-image"/>' if cover_src else ""
+    credit_meta = f"<dc:contributor>{_xml_escape(credit)}</dc:contributor>" if credit else ""
     opf = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id" xml:lang="en">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -1219,6 +1264,7 @@ def _images_to_epub(
     <dc:title>{title_text}</dc:title>
     <dc:language>en</dc:language>
     <dc:creator id="creator">{_xml_escape(title)}</dc:creator>
+    {credit_meta}
     <meta property="dcterms:modified">{modified}</meta>
     <meta property="rendition:layout">pre-paginated</meta>
     <meta property="rendition:orientation">auto</meta>
@@ -1244,7 +1290,8 @@ def _images_to_epub(
             zf.writestr(f"EPUB/{name}", data, compress_type=zipfile.ZIP_DEFLATED)
 
 
-def _images_to_pdf(image_paths: List[Path], output_path: Path):
+def _images_to_pdf(image_paths: List[Path], output_path: Path,
+                   credit: Optional[str] = None):
     """Convert a list of images to a single PDF."""
     processed_images = []
 
@@ -1258,7 +1305,7 @@ def _images_to_pdf(image_paths: List[Path], output_path: Path):
     if not processed_images:
         raise DownloaderError("No images could be processed")
 
-    pdf_bytes = img2pdf.convert(processed_images)
+    pdf_bytes = img2pdf.convert(processed_images, author=credit) if credit else img2pdf.convert(processed_images)
     output_path.write_bytes(pdf_bytes)
 
 
@@ -1338,6 +1385,8 @@ def _build_comicinfo_xml(
         add("Day", day)
 
     add("Writer", manga.get("author"))
+    # MangaDex credit: the scanlation group(s) that translated this chapter.
+    add("Translator", ", ".join(getattr(chapter, "group_names", [])))
 
     # Web: prefer the specific chapter URL, fall back to the manga URL.
     add("Web", getattr(chapter, "url", "") or manga.get("url", ""))
@@ -1350,6 +1399,7 @@ def _images_to_cbz(
     image_paths: List[Path],
     output_path: Path,
     comicinfo_xml: Optional[bytes] = None,
+    credit: Optional[str] = None,
 ):
     """Convert a list of images to a CBZ (Comic Book ZIP) archive.
 
@@ -1371,6 +1421,8 @@ def _images_to_cbz(
             cbz.write(img_path, f"page_{i:03d}{ext}")
         if comicinfo_xml is not None:
             cbz.writestr("ComicInfo.xml", comicinfo_xml)
+        if credit:
+            cbz.writestr("Source.txt", credit + "\n")
 
 
 def _images_to_folder(image_paths: List[Path], output_dir: Path, img_format: str):

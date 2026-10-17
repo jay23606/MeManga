@@ -306,6 +306,25 @@ class TestSettingsPage:
         # No exception = passes. Config got at least one write.
         assert app_window.config.get("delivery.output_format") is not None
 
+    def test_mangadex_quality_choice_saves_and_resets(self, app_window, qapp):
+        page = app_window._pages["settings"]
+        assert page._mangadex_quality.currentData() is False
+        page._mangadex_quality.setCurrentIndex(1)
+        page._save()
+        assert app_window.config.get("mangadex.data_saver") is True
+        page._reset_to_defaults()
+        assert app_window.config.get("mangadex.data_saver") is False
+        assert page._mangadex_quality.currentData() is False
+
+    def test_reset_defaults_keeps_removed_mangadex_groups(self, app_window, qapp):
+        page = app_window._pages["settings"]
+        group = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b"
+        app_window.config.set("mangadex.data_saver", True)
+        app_window.config.set("mangadex.removed_group_ids", [group])
+        page._reset_to_defaults()
+        assert app_window.config.get("mangadex.data_saver") is False
+        assert app_window.config.get("mangadex.removed_group_ids") == [group]
+
     def test_save_writes_post_processing_settings(self, app_window, qapp):
         page = app_window._pages["settings"]
         page._post_processing_check.setChecked(True)

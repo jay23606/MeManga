@@ -35,7 +35,7 @@ from .cron import (build_cron_line, build_task_command, managed_lines,
                    source_checkout_root, unmanaged_memanga_lines)
 from . import doctor
 from .state import State, _chapter_number
-from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga
+from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
 from .scrapers import get_scraper
 from .search import compute_search_sources, probe_chapter_counts, sweep
 from .emailer import send_to_kindle, EmailError
@@ -163,6 +163,18 @@ def _non_negative_int_arg(value):
             f"expected a non-negative integer, got {value!r}"
         )
     return num
+
+
+def _mangadex_group_id_arg(value):
+    """argparse type for --mangadex-remove-group: a MangaDex group UUID."""
+    import uuid
+    try:
+        return str(uuid.UUID(value))
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"invalid group ID {value!r}: expected the UUID from the "
+            "group's MangaDex page URL"
+        )
 
 
 def _partial_threshold_arg(value):
@@ -1033,6 +1045,7 @@ def _download_chapter_pipeline(manga, ch, ch_label, opts) -> bool:
         partial_info.clear()
         file_path = download_chapter(
             manga, ch, download_dir, output_format,
+            state=state,
             max_retries=max_retries,
             post_processing=post_processing,
             allow_partial=primary_allow_partial,
@@ -1059,7 +1072,7 @@ def _download_chapter_pipeline(manga, ch, ch_label, opts) -> bool:
 
         backup_ch = None
         if not is_from_backup:
-            backup_ch = _find_chapter_on_backup(manga, ch.number)
+            backup_ch = _find_chapter_on_backup(manga, ch.number, state)
 
         saved = False
         backup_e = None
@@ -1070,6 +1083,7 @@ def _download_chapter_pipeline(manga, ch, ch_label, opts) -> bool:
             try:
                 file_path = download_chapter(
                     manga, backup_ch, download_dir, output_format,
+                    state=state,
                     max_retries=max_retries,
                     post_processing=post_processing,
                 )
@@ -1104,6 +1118,7 @@ def _download_chapter_pipeline(manga, ch, ch_label, opts) -> bool:
                 try:
                     file_path = download_chapter(
                         manga, cand, download_dir, output_format,
+                        state=state,
                         max_retries=max_retries,
                         post_processing=post_processing,
                         allow_partial=True,
@@ -1473,24 +1488,42 @@ def cmd_config(args):
     # dropping into the interactive prompt flow.
     partial = getattr(args, "partial", None)
     threshold = getattr(args, "partial_threshold", None)
-    if partial is not None or threshold is not None:
+    mangadex_quality = getattr(args, "mangadex_quality", None)
+    remove_group = getattr(args, "mangadex_remove_group", None)
+    if (partial is not None or threshold is not None or
+            mangadex_quality is not None or remove_group is not None):
         if partial is not None:
             config.set("partial_chapters.enabled", partial == "on")
         if threshold is not None:
             # Already validated to [0, 100] by the argparse type.
             config.set("partial_chapters.threshold_percent", float(threshold))
+        if mangadex_quality is not None:
+            config.set("mangadex.data_saver", mangadex_quality == "data-saver")
+        if remove_group is not None:
+            groups = list(config.get("mangadex.removed_group_ids", []) or [])
+            if remove_group not in groups:
+                groups.append(remove_group)
+            config.set("mangadex.removed_group_ids", groups)
         config.save()
 
-        state_str = "enabled" if config.partial_enabled else "disabled"
-        console.print(
-            f"[green]✅ Partial-chapter tolerance {state_str}[/green] "
-            f"[dim](threshold: {config.partial_threshold:g}%)[/dim]"
-        )
+        if partial is not None or threshold is not None:
+            state_str = "enabled" if config.partial_enabled else "disabled"
+            console.print(
+                f"[green]✅ Partial-chapter tolerance {state_str}[/green] "
+                f"[dim](threshold: {config.partial_threshold:g}%)[/dim]"
+            )
+        if mangadex_quality is not None:
+            console.print(f"[green]✅ MangaDex image quality: {mangadex_quality}[/green]")
+        if remove_group is not None:
+            console.print(
+                f"[green]✅ MangaDex group {remove_group} removed[/green] "
+                "[dim](delete its downloaded chapters too)[/dim]"
+            )
         return
 
     if not _stdin_is_tty():
         return _non_interactive_error(
-            "interactive config needs a terminal; use --show or --partial/--partial-threshold"
+            "interactive config needs a terminal; use --show or a config flag"
         )
 
     console.print(Panel("[bold]⚙️  Configure MeManga[/bold]", border_style="yellow"))
@@ -1566,6 +1599,13 @@ def cmd_config(args):
         config.set("delivery.output_format", "png")
     elif fmt_choice == "7":
         config.set("delivery.output_format", "webp")
+
+    current_quality = "data-saver" if config.get("mangadex.data_saver", False) else "original"
+    quality = Prompt.ask(
+        "MangaDex image quality", choices=["original", "data-saver"],
+        default=current_quality,
+    )
+    config.set("mangadex.data_saver", quality == "data-saver")
 
     # Post-processing hook (optional, disabled by default)
     pp_enabled = bool(config.get("delivery.post_processing.enabled"))
@@ -2325,6 +2365,7 @@ def cmd_failed(args):
                 src = sources[0]
                 try:
                     scraper = get_scraper(src["source"])
+                    _configure_mangadex(scraper, state)
                     all_chapters = scraper.get_chapters(src["url"])
                     ch_obj = next((c for c in all_chapters if c.number == chapter_num), None)
                 except Exception:
@@ -2333,7 +2374,7 @@ def cmd_failed(args):
                 if not ch_obj:
                     err_console.print(f"  [yellow]⚠️  Could not find Chapter {_esc(chapter_num)} of {_esc(manga_title)} on primary source[/yellow]")
                     # Try backup directly
-                    ch_obj = _find_chapter_on_backup(manga, chapter_num)
+                    ch_obj = _find_chapter_on_backup(manga, chapter_num, state)
                     if not ch_obj:
                         err_console.print(f"  [red]❌ Chapter {_esc(chapter_num)} not found on any source[/red]")
                         retried += 1
@@ -2760,6 +2801,14 @@ Examples:
     # config
     p_config = subparsers.add_parser("config", help="Configure settings")
     p_config.add_argument("--show", action="store_true", help="Show current config")
+    p_config.add_argument(
+        "--mangadex-quality", choices=["original", "data-saver"],
+        help="Select MangaDex chapter image quality",
+    )
+    p_config.add_argument(
+        "--mangadex-remove-group", type=_mangadex_group_id_arg, metavar="GROUP_ID",
+        help="Block a scanlation group's MangaDex chapters by group ID",
+    )
     # Non-interactive partial-chapter tolerance controls (issue #86). When
     # omitted, `config` stays interactive.
     p_config.add_argument(

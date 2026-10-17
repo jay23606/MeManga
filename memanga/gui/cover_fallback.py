@@ -13,6 +13,7 @@ import re
 from typing import Optional
 
 import requests
+from ..scrapers.mangadex import USER_AGENT
 
 
 _MANGADEX_API = "https://api.mangadex.org/manga"
@@ -65,7 +66,7 @@ def fetch_mangadex_cover(title: str) -> Optional[str]:
                 "order[relevance]": "desc",
             },
             timeout=_TIMEOUT,
-            headers={"User-Agent": "MeManga/1.0 (cover-fallback)"},
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
         )
         resp.raise_for_status()
         payload = resp.json()

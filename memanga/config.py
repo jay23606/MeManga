@@ -120,6 +120,10 @@ class Config:
             "reader": {
                 "remove_after_read": False,
             },
+            "mangadex": {
+                "data_saver": False,
+                "removed_group_ids": [],
+            },
             # Partial-chapter tolerance (issue #86). Off by default: any
             # missing page still aborts the chapter and discards output.
             # When enabled, a chapter whose failure rate is within

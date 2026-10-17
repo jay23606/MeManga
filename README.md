@@ -316,6 +316,31 @@ If MangaPill stops updating, MeManga falls back to MangaDex after
 `fallback_delay_days` (default 2) — long enough for a slow-translating
 primary to catch up.
 
+### MangaDex downloads
+
+MeManga credits MangaDex and the chapter's scanlation group in the built-in
+reader and saved chapter metadata (or `Source.txt` for image archives/folders).
+Original image quality is the default. For smaller Kindle and e-reader
+downloads, choose **Settings → General → MangaDex Image Quality → Data saver**,
+or run `python -m memanga config --mangadex-quality data-saver`. Choose
+`original` to switch back. The choice applies to the next download, not files
+already saved.
+
+Active scanlation group leaders can ask for their group's chapters to be
+removed by opening an issue with the MangaDex group link. Group IDs accepted
+from those requests are added to a future release; none are built in yet.
+To block a group yourself, use the UUID from its MangaDex group page:
+`python -m memanga config --mangadex-remove-group GROUP_ID`. Checks, downloads
+and the built-in reader then skip that group's chapters. Delete chapters
+you already downloaded from that group, including copies sent to an e-reader;
+MeManga does not delete saved files. Restart the desktop
+app after changing this setting from the CLI. Blocked IDs appear in
+`python -m memanga config --show`.
+
+MeManga also sends MangaDex@Home the per-image load report it asks clients
+for (image URL, success, cache hit, size and time) and switches to a new image
+server after a failed page.
+
 ### Backfill an entire series from chapter 1
 
 ```bash

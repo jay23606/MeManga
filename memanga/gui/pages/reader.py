@@ -1060,8 +1060,33 @@ class ReaderPage(BasePage):
 
         content_layout.addWidget(top)
 
+        # MangaDex chapters credit MangaDex and the scanlation group, and a
+        # chapter from a group that asked for removal is not shown.
+        from ...downloader import _get_sources_from_manga
+        from ...scrapers.mangadex import removed_group_ids
+        # The saved file's own group record wins over the cached list,
+        # which a later check may have refilled without that group (#400).
+        entry = self.app.app_state.get_chapter_groups(title, self._chapter)
+        if not entry:
+            available = self.app.app_state.get_available_chapters(title)
+            entry = next((c for c in available
+                          if str(c.get("number")) == str(self._chapter)), {})
+        sources = _get_sources_from_manga(self._manga)
+        source = entry.get("source") or (sources[0]["source"] if sources else "")
+        is_mangadex = source in ("mangadex.org", "api.mangadex.org")
+        unavailable = is_mangadex and bool(
+            removed_group_ids(self.app.config) & set(entry.get("group_ids", [])))
+        if is_mangadex:
+            names = entry.get("group_names", [])
+            credit = "MangaDex" + (" · " + ", ".join(names) if names else "")
+            credit_label = QLabel(credit)
+            credit_label.setTextFormat(Qt.TextFormat.PlainText)
+            credit_label.setProperty("role", "hint")
+            credit_label.setContentsMargins(24, 6, 24, 6)
+            content_layout.addWidget(credit_label)
+
         # ── Load images ──
-        self._images = self._find_and_load_chapter()
+        self._images = [] if unavailable else self._find_and_load_chapter()
         self._page_labels.clear()
 
         if not self._images:
@@ -1078,6 +1103,8 @@ class ReaderPage(BasePage):
             )
             empty.setStyleSheet(f"color: {T.FG_MUTED}; font-size: {T.FONT_SIZE_SM}pt;")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if unavailable:
+                empty.setText("This chapter is unavailable at the scanlation group's request. Recheck the series for current chapters.")
             empty.setWordWrap(True)
             content_layout.addWidget(empty, 1)
             return

@@ -7,6 +7,16 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #400 MangaDex chapters credit MangaDex and the scanlation group in the
+  built-in reader and in saved chapters (EPUB/PDF metadata, ComicInfo
+  `Translator`, or `Source.txt`). Chapters from groups that asked for
+  removal are skipped; `config --mangadex-remove-group GROUP_ID` adds a
+  group locally.
+- #400 MangaDex image quality can be set to data saver for smaller
+  e-reader downloads (`config --mangadex-quality data-saver` or Settings →
+  General). Original quality stays the default.
+- #400 MangaDex@Home image loads are reported to MangaDex, and a failed
+  page is retried on a newly assigned image server.
 - #250 `memanga doctor` checks the config and state files, download
   directory, email and keyring setup, the scheduled-check entry, cached
   source health and the Playwright browser installs in one report. It

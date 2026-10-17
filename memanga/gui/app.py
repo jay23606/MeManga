@@ -506,6 +506,8 @@ class MeMangaApp(QMainWindow):
                         "source_url": getattr(c, "source_url", ""),
                         "is_backup": getattr(c, "is_backup", False),
                         "url": c.url,
+                        "group_ids": getattr(c, "group_ids", []),
+                        "group_names": getattr(c, "group_names", []),
                     }
                     for c in all_chapters
                 ]

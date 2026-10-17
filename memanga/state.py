@@ -283,8 +283,32 @@ class State:
             if chapter_str not in downloaded:
                 return False
             downloaded.remove(chapter_str)
+            manga_state.get("saved_chapter_groups", {}).pop(chapter_str, None)
             self._mark_dirty()
             return True
+
+    def set_chapter_groups(self, manga_title: str, chapter: str, source: str,
+                           group_ids: List[str], group_names: List[str]):
+        """Record the scanlation group(s) of a saved chapter (issue #400).
+
+        Kept apart from ``available_chapters`` so a later check, which may
+        drop a removed group's upload from the feed, can't erase who the
+        saved file came from.
+        """
+        with self._locked() as data:
+            self._ensure_manga_entry(manga_title)
+            entry = data["manga"][manga_title]
+            entry.setdefault("saved_chapter_groups", {})[str(chapter)] = {
+                "source": source,
+                "group_ids": list(group_ids or []),
+                "group_names": list(group_names or []),
+            }
+            self._mark_dirty()
+
+    def get_chapter_groups(self, manga_title: str, chapter: str) -> Dict[str, Any]:
+        """Saved chapter's group record, or an empty dict if none was kept."""
+        groups = self._entry_value(manga_title, "saved_chapter_groups", {}) or {}
+        return groups.get(str(chapter), {})
 
     # ========================================================================
     # Backup Source Tracking
@@ -710,7 +734,21 @@ class State:
         """
         with self._locked() as data:
             self._ensure_manga_entry(manga_title)
-            data["manga"][manga_title]["available_chapters"] = self._snapshot(list(chapters))
+            entry = data["manga"][manga_title]
+            # Keep the group of chapters saved before their record existed:
+            # the new list may no longer include that group's upload.
+            downloaded = set(entry.get("downloaded", []))
+            for old in entry.get("available_chapters", []) or []:
+                num = str(old.get("number", ""))
+                if (num in downloaded
+                        and num not in entry.get("saved_chapter_groups", {})
+                        and (old.get("group_ids") or old.get("group_names"))):
+                    entry.setdefault("saved_chapter_groups", {})[num] = {
+                        "source": old.get("source", ""),
+                        "group_ids": list(old.get("group_ids", [])),
+                        "group_names": list(old.get("group_names", [])),
+                    }
+            entry["available_chapters"] = self._snapshot(list(chapters))
             self._mark_dirty()
 
     def get_available_chapters(self, manga_title: str) -> List[Dict[str, Any]]:

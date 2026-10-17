@@ -188,6 +188,40 @@ class TestPartialChapters:
         assert "5" not in state.get_partial_chapters("X")
 
 
+class TestSavedChapterGroups:
+    """Issue #400: a saved MangaDex chapter keeps its group record even
+    when a later check refills the cached chapter list without it."""
+
+    def test_record_round_trips_and_clears_with_download(self, state):
+        state.add_downloaded_chapter("X", "1")
+        state.set_chapter_groups("X", "1", "mangadex.org", ["g-a"], ["Group A"])
+        assert state.get_chapter_groups("X", "1") == {
+            "source": "mangadex.org", "group_ids": ["g-a"], "group_names": ["Group A"]}
+        assert state.get_chapter_groups("X", "2") == {}
+        state.remove_downloaded_chapter("X", "1")
+        assert state.get_chapter_groups("X", "1") == {}
+
+    def test_refreshed_list_keeps_group_of_saved_chapter(self, state):
+        state.add_downloaded_chapter("X", "1")
+        state.set_available_chapters("X", [
+            {"number": "1", "source": "mangadex.org",
+             "group_ids": ["g-a"], "group_names": ["Group A"]},
+            {"number": "2", "source": "mangadex.org",
+             "group_ids": ["g-a"], "group_names": ["Group A"]},
+        ])
+        # The next feed drops the group's uploads entirely.
+        state.set_available_chapters("X", [{"number": "3", "group_ids": ["g-b"]}])
+        assert state.get_chapter_groups("X", "1")["group_ids"] == ["g-a"]
+        assert state.get_chapter_groups("X", "2") == {}  # never downloaded
+
+    def test_refreshed_list_does_not_replace_existing_record(self, state):
+        state.add_downloaded_chapter("X", "1")
+        state.set_chapter_groups("X", "1", "mangadex.org", ["g-a"], ["Group A"])
+        state.set_available_chapters("X", [{"number": "1", "group_ids": ["g-b"]}])
+        state.set_available_chapters("X", [])
+        assert state.get_chapter_groups("X", "1")["group_ids"] == ["g-a"]
+
+
 class TestExternalChapters:
     def test_mark_and_check_external(self, state):
         state.mark_external_chapter("X", "3")
