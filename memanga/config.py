@@ -295,3 +295,170 @@ def set_app_password(cfg: Config, password: str):
     # Fallback: store in config
     cfg.set("email.app_password", password)
     cfg.save()
+
+
+# ============================================================================
+# Keys the `config get/set` commands accept (issue #353)
+# ============================================================================
+
+OUTPUT_FORMATS = ("pdf", "epub", "cbz", "zip", "jpg", "png", "webp")
+
+_TRUE_WORDS = {"true", "yes", "on", "1"}
+_FALSE_WORDS = {"false", "no", "off", "0"}
+
+
+class UnknownConfigKey(KeyError):
+    """The dotted key is not one `config get/set` knows."""
+
+
+# kind: bool | int | float | choice | str | time | list
+# secret: never printed; read_only: owned by another command.
+CONFIG_KEYS = {
+    "delivery.mode": {"kind": "choice", "choices": ("local", "email")},
+    "delivery.download_dir": {"kind": "str", "required": True},
+    "delivery.delete_after_send": {"kind": "bool"},
+    "delivery.output_format": {"kind": "choice", "choices": OUTPUT_FORMATS},
+    "delivery.naming_template": {"kind": "str", "required": True},
+    "delivery.post_processing.enabled": {"kind": "bool"},
+    "delivery.post_processing.command": {"kind": "str"},
+    "delivery.post_processing.fail_on_error": {"kind": "bool"},
+    "email.kindle_email": {"kind": "str"},
+    "email.sender_email": {"kind": "str"},
+    "email.smtp_server": {"kind": "str", "required": True},
+    "email.smtp_port": {"kind": "int", "min": 1, "max": 65535},
+    "email.app_password": {"kind": "str", "secret": True},
+    "cron.enabled": {"kind": "bool", "read_only": "memanga cron install/remove"},
+    "cron.time": {"kind": "time", "read_only": "memanga cron install --time HH:MM"},
+    "gui.sort_by": {"kind": "choice", "choices": (
+        "title", "last_updated", "recently_added", "chapter_count", "status")},
+    "gui.auto_check": {"kind": "bool"},
+    "gui.auto_check_interval": {"kind": "int", "min": 60},
+    "gui.reader_prefetch_next": {"kind": "bool"},
+    "reader.remove_after_read": {"kind": "bool"},
+    "mangadex.data_saver": {"kind": "bool"},
+    "mangadex.removed_group_ids": {
+        "kind": "list", "read_only": "memanga config --mangadex-remove-group"},
+    "partial_chapters.enabled": {"kind": "bool"},
+    "partial_chapters.threshold_percent": {"kind": "float", "min": 0, "max": 100},
+}
+
+
+def config_key_spec(key):
+    """Return the schema entry for ``key``; raise UnknownConfigKey."""
+    try:
+        return CONFIG_KEYS[key]
+    except KeyError:
+        raise UnknownConfigKey(key) from None
+
+
+def _is_hhmm(value) -> bool:
+    parts = str(value).split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return False
+    return 0 <= int(parts[0]) <= 23 and 0 <= int(parts[1]) <= 59
+
+
+def _range_problem(spec, value):
+    low, high = spec.get("min"), spec.get("max")
+    if low is not None and value < low:
+        return f"must be at least {low:g}"
+    if high is not None and value > high:
+        return f"must be at most {high:g}"
+    return None
+
+
+def parse_config_value(key, text):
+    """Turn the command-line ``text`` for ``key`` into the stored value.
+
+    Raises UnknownConfigKey for keys outside CONFIG_KEYS and ValueError
+    with a short reason for values the key does not accept.
+    """
+    spec = config_key_spec(key)
+    kind = spec["kind"]
+    text = str(text)
+    if kind == "bool":
+        word = text.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+        raise ValueError("expected true or false")
+    if kind in ("int", "float"):
+        try:
+            value = int(text.strip()) if kind == "int" else float(text.strip())
+        except ValueError:
+            raise ValueError("expected a whole number" if kind == "int"
+                             else "expected a number") from None
+        if kind == "float" and value != value:  # NaN
+            raise ValueError("expected a number")
+        problem = _range_problem(spec, value)
+        if problem:
+            raise ValueError(problem)
+        return value
+    if kind == "choice":
+        word = text.strip().lower()
+        if word not in spec["choices"]:
+            raise ValueError("expected one of: " + ", ".join(spec["choices"]))
+        return word
+    if kind == "time":
+        if not _is_hhmm(text.strip()):
+            raise ValueError("expected HH:MM")
+        hour, minute = text.strip().split(":")
+        return f"{int(hour):02d}:{int(minute):02d}"
+    if kind == "str":
+        if spec.get("required") and not text.strip():
+            raise ValueError("must not be empty")
+        return text
+    raise ValueError("cannot be set from the command line")
+
+
+def config_section_problems(data):
+    """Sections on the way to a known key that are not mappings.
+
+    ``data`` is the raw YAML mapping, before defaults are merged in:
+    loading quietly replaces or skips a section that is not a mapping,
+    so its values would never be checked.
+    """
+    problems = []
+    for key in CONFIG_KEYS:
+        parts = key.split(".")
+        node = data
+        for depth, part in enumerate(parts[:-1], start=1):
+            if part not in node:
+                break
+            node = node[part]
+            if not isinstance(node, dict):
+                problem = f"{'.'.join(parts[:depth])}: expected a section"
+                if problem not in problems:
+                    problems.append(problem)
+                break
+    return problems
+
+
+def config_value_problem(key, value):
+    """Why the stored ``value`` is not valid for ``key``, or None.
+
+    Used after a hand edit, where values arrive already typed by YAML.
+    """
+    spec = config_key_spec(key)
+    kind = spec["kind"]
+    if kind == "bool":
+        return None if isinstance(value, bool) else "expected true or false"
+    if kind in ("int", "float"):
+        types = (int,) if kind == "int" else (int, float)
+        if isinstance(value, bool) or not isinstance(value, types):
+            return "expected a whole number" if kind == "int" else "expected a number"
+        return _range_problem(spec, value)
+    if kind == "choice":
+        if value not in spec["choices"]:
+            return "expected one of: " + ", ".join(spec["choices"])
+        return None
+    if kind == "time":
+        return None if isinstance(value, str) and _is_hhmm(value) else "expected HH:MM"
+    if kind == "list":
+        return None if isinstance(value, list) else "expected a list"
+    if not isinstance(value, str):
+        return "expected text"
+    if spec.get("required") and not value.strip():
+        return "must not be empty"
+    return None

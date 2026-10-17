@@ -144,3 +144,81 @@ class TestInvalidConfigFile:
         cfg.reload()
         assert cfg.load_error is None
         cfg.save()
+
+
+class TestConfigKeys:
+    """Schema behind `config get/set/edit` (issue #353)."""
+
+    @pytest.mark.parametrize("key,text,expected", [
+        ("delivery.output_format", "EPUB", "epub"),
+        ("delivery.mode", "email", "email"),
+        ("delivery.delete_after_send", "yes", True),
+        ("gui.auto_check", "off", False),
+        ("email.smtp_port", "587", 587),
+        ("partial_chapters.threshold_percent", "12.5", 12.5),
+        ("cron.time", "6:5", "06:05"),
+        ("delivery.post_processing.command", "", ""),
+        ("email.kindle_email", "me@kindle.com", "me@kindle.com"),
+    ])
+    def test_parse_accepts(self, key, text, expected):
+        from memanga.config import parse_config_value
+        value = parse_config_value(key, text)
+        assert value == expected
+        assert type(value) is type(expected)
+
+    @pytest.mark.parametrize("key,text", [
+        ("delivery.output_format", "mobi"),
+        ("delivery.delete_after_send", "maybe"),
+        ("email.smtp_port", "0"),
+        ("email.smtp_port", "70000"),
+        ("email.smtp_port", "5.5"),
+        ("partial_chapters.threshold_percent", "150"),
+        ("partial_chapters.threshold_percent", "nan"),
+        ("cron.time", "25:00"),
+        ("cron.time", "noon"),
+        ("delivery.naming_template", "  "),
+        ("gui.auto_check_interval", "5"),
+        ("mangadex.removed_group_ids", "x"),
+    ])
+    def test_parse_rejects(self, key, text):
+        from memanga.config import parse_config_value
+        with pytest.raises(ValueError):
+            parse_config_value(key, text)
+
+    def test_unknown_key(self):
+        from memanga.config import UnknownConfigKey, parse_config_value
+        with pytest.raises(UnknownConfigKey):
+            parse_config_value("manga", "[]")
+
+    def test_defaults_are_valid(self, isolated_home):
+        from memanga.config import CONFIG_KEYS, Config, config_value_problem
+        cfg = Config()
+        for key in CONFIG_KEYS:
+            assert config_value_problem(key, cfg.get(key)) is None, key
+
+    @pytest.mark.parametrize("key,value", [
+        ("email.smtp_port", "587"),
+        ("email.smtp_port", True),
+        ("delivery.delete_after_send", "yes"),
+        ("delivery.output_format", "mobi"),
+        ("cron.time", 450),  # unquoted 7:30 in YAML 1.1
+        ("partial_chapters.threshold_percent", 101),
+        ("mangadex.removed_group_ids", "abc"),
+    ])
+    def test_value_problem(self, key, value):
+        from memanga.config import config_value_problem
+        assert config_value_problem(key, value)
+
+    @pytest.mark.parametrize("data,expected", [
+        ({}, []),
+        ({"delivery": {"mode": "local"}}, []),
+        ({"delivery": {"post_processing": "oops"}},
+         ["delivery.post_processing: expected a section"]),
+        ({"delivery": None}, ["delivery: expected a section"]),
+        ({"email": [], "gui": 3},
+         ["email: expected a section", "gui: expected a section"]),
+        ({"manga": "not checked here"}, []),
+    ])
+    def test_section_problems(self, data, expected):
+        from memanga.config import config_section_problems
+        assert config_section_problems(data) == expected

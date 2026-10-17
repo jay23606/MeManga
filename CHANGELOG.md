@@ -7,6 +7,14 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #353 `memanga config` gains `show [--json]`, `get KEY`, `set KEY VALUE`,
+  `path`, `edit` and `email [--test]` for scripts, Docker and support.
+  `get` prints only the value, `set` checks the key and value before
+  saving, and the app password stays masked; it is set with
+  `config set email.app_password -` from stdin, never from the command
+  line. `config path` and `config edit` also work when config.yaml cannot
+  be loaded. The existing `config` flags and the interactive editor are
+  unchanged.
 - #400 MangaDex chapters credit MangaDex and the scanlation group in the
   built-in reader and in saved chapters (EPUB/PDF metadata, ComicInfo
   `Translator`, or `Source.txt`). Chapters from groups that asked for
