@@ -269,7 +269,12 @@ Use the included `compose.yaml` for repeated commands:
 docker compose build
 docker compose run --rm memanga list
 docker compose run --rm memanga check --download
+docker compose run --rm memanga config set delivery.output_format epub
 ```
+
+`config set email.app_password -` reads the app password from stdin
+(pipe it in with `docker compose run --rm -T`), so it never appears in
+the command line.
 
 For a host cron job, run Compose from the repository directory:
 
@@ -291,6 +296,8 @@ For a host cron job, run Compose from the repository directory:
 | `status [--json]` | Show config dir, download dir, manga count, last check time |
 | `doctor [--json] [--check NAME] [--smtp] [--launch-browsers]` | Diagnose install, paths, browsers, email, keyring, scheduler and source health |
 | `config` | Interactive settings editor |
+| `config show [--json]` / `config get KEY` / `config set KEY VALUE` | Show, read or change settings without prompts; values are checked before saving and the app password stays masked |
+| `config path` / `config edit` / `config email [--test]` | Print the config file path, open it in `$VISUAL`/`$EDITOR` and check it, show email settings (`--test` logs in to SMTP) |
 | `cron install [--time 06:00]` | Schedule a daily `check --auto --quiet` job (`--auto` is an alias of `--download`) |
 | `cron status` / `cron remove` | Inspect / uninstall the cron job |
 | `sources` | List all 319 supported domains, marking which ones are healthy |

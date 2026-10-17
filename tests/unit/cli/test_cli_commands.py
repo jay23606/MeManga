@@ -985,6 +985,322 @@ class TestConfigCommand:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# `config show/get/set/path/edit/email` — scriptable config (#353)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestConfigActions:
+    @pytest.fixture(autouse=True)
+    def keyring_store(self, monkeypatch):
+        # Never touch the real OS keychain.
+        import keyring
+        store = {}
+        monkeypatch.setattr(keyring, "set_password",
+                            lambda s, u, p: store.__setitem__((s, u), p))
+        monkeypatch.setattr(keyring, "get_password",
+                            lambda s, u: store.get((s, u)))
+        return store
+
+    @pytest.fixture
+    def config_path(self, isolated_home):
+        return isolated_home / ".config" / "memanga" / "config.yaml"
+
+    @pytest.fixture
+    def tty(self, monkeypatch):
+        monkeypatch.setattr("memanga.cli._stdin_is_tty", lambda: True)
+
+    @pytest.fixture
+    def editor(self, monkeypatch, tty):
+        """Fake $EDITOR: writes ``text`` to the file it is given."""
+        import subprocess
+        calls = []
+
+        def install(text=None, returncode=0):
+            def fake_run(cmd, *a, **k):
+                calls.append(cmd)
+                if text is not None:
+                    with open(cmd[-1], "w", encoding="utf-8") as f:
+                        f.write(text)
+                return subprocess.CompletedProcess(cmd, returncode)
+            monkeypatch.setenv("EDITOR", "fake-editor --wait")
+            monkeypatch.delenv("VISUAL", raising=False)
+            monkeypatch.setattr("memanga.cli.subprocess.run", fake_run)
+            return calls
+        return install
+
+    # ── get / show ──
+
+    @pytest.mark.parametrize("key,expected", [
+        ("delivery.output_format", "pdf\n"),
+        ("delivery.delete_after_send", "false\n"),
+        ("email.smtp_port", "587\n"),
+        ("mangadex.removed_group_ids", "[]\n"),
+        ("email.kindle_email", "\n"),
+    ])
+    def test_get_prints_only_the_value(self, run_cli, capsys, key, expected):
+        assert run_cli("config", "get", key) == 0
+        captured = capsys.readouterr()
+        assert captured.out == expected
+        assert captured.err == ""
+
+    def test_get_unknown_key_fails_on_stderr(self, run_cli, capsys):
+        assert run_cli("config", "get", "bogus.key") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "unknown config key 'bogus.key'" in captured.err
+
+    def test_show_json_masks_password(self, run_cli, config, capsys):
+        config.set("email.app_password", "file-secret")
+        config.save()
+        assert run_cli("config", "show", "--json") == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert payload["email"]["app_password"] == "****"
+        assert payload["delivery"]["output_format"] == "pdf"
+        assert "file-secret" not in out
+
+    def test_show_matches_legacy_flag(self, run_cli, config, capsys):
+        config.set("email.app_password", "file-secret")
+        config.save()
+        assert run_cli("config", "show") == 0
+        action_out = capsys.readouterr().out
+        assert run_cli("config", "--show") == 0
+        assert capsys.readouterr().out == action_out
+        assert "Current Configuration" in action_out
+        assert "file-secret" not in action_out
+
+    # ── set ──
+
+    def test_set_persists_typed_value(self, run_cli, config, capsys):
+        assert run_cli("config", "set", "delivery.output_format", "epub") == 0
+        assert run_cli("config", "set", "email.smtp_port", "465") == 0
+        assert run_cli("config", "set", "delivery.delete_after_send", "yes") == 0
+        assert config.get("delivery.output_format") == "epub"
+        assert config.get("email.smtp_port") == 465
+        assert config.get("delivery.delete_after_send") is True
+        capsys.readouterr()
+        assert run_cli("config", "get", "email.smtp_port") == 0
+        assert capsys.readouterr().out == "465\n"
+
+    @pytest.mark.parametrize("key,value", [
+        ("delivery.output_format", "mobi"),
+        ("email.smtp_port", "abc"),
+        ("email.smtp_port", "0"),
+        ("partial_chapters.threshold_percent", "150"),
+        ("delivery.mode", "fax"),
+    ])
+    def test_set_invalid_value_does_not_write(self, run_cli, config_path,
+                                              capsys, key, value):
+        assert run_cli("config", "set", "delivery.mode", "local") == 0
+        before = config_path.read_bytes()
+        capsys.readouterr()
+        assert run_cli("config", "set", key, value) == 1
+        assert f"invalid value for {key}" in capsys.readouterr().err
+        assert config_path.read_bytes() == before
+
+    def test_set_unknown_key_does_not_write(self, run_cli, config_path, capsys):
+        assert run_cli("config", "set", "manga", "[]") == 1
+        assert "unknown config key" in capsys.readouterr().err
+        assert not config_path.exists()
+
+    @pytest.mark.parametrize("key,value,owner,default", [
+        ("cron.enabled", "true", "memanga cron install/remove", False),
+        # The schedule is only rewritten by `cron install`.
+        ("cron.time", "07:05", "memanga cron install --time", "06:00"),
+        ("mangadex.removed_group_ids", "x", "--mangadex-remove-group", []),
+    ])
+    def test_set_read_only_key_names_the_owner(self, run_cli, config, config_path,
+                                               capsys, key, value, owner, default):
+        assert run_cli("config", "set", key, value) == 1
+        assert owner in capsys.readouterr().err
+        assert config.get(key) == default
+        assert not config_path.exists()
+
+    def test_set_needs_a_value(self, run_cli, capsys):
+        assert run_cli("config", "set", "delivery.mode") == 1
+        assert "needs a VALUE" in capsys.readouterr().err
+
+    # ── secrets ──
+
+    def test_set_secret_from_stdin(self, run_cli, monkeypatch, capsys,
+                                   keyring_store, config_path):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("s3cret-pw\n"))
+        assert run_cli("config", "set", "email.app_password", "-") == 0
+        assert keyring_store == {("memanga", "app_password"): "s3cret-pw"}
+        assert run_cli("config", "get", "email.app_password") == 0
+        assert run_cli("config", "show", "--json") == 0
+        captured = capsys.readouterr()
+        assert "s3cret-pw" not in captured.out + captured.err
+        assert "****\n" in captured.out
+        assert not config_path.exists() or "s3cret-pw" not in config_path.read_text()
+
+    def test_set_secret_falls_back_to_config_masked(self, run_cli, monkeypatch,
+                                                    capsys, config):
+        import keyring
+
+        def broken(*a):
+            raise RuntimeError("no backend")
+        monkeypatch.setattr(keyring, "set_password", broken)
+        monkeypatch.setattr(keyring, "get_password", broken)
+        monkeypatch.setattr(sys, "stdin", io.StringIO("plain-pw\n"))
+        assert run_cli("config", "set", "email.app_password", "-") == 0
+        assert config.get("email.app_password") == "plain-pw"
+        assert run_cli("config", "get", "email.app_password") == 0
+        captured = capsys.readouterr()
+        assert "plain-pw" not in captured.out + captured.err
+        assert captured.out.endswith("****\n")
+
+    def test_secret_on_command_line_is_refused(self, run_cli, capsys, keyring_store):
+        assert run_cli("config", "set", "email.app_password", "argv-pw") == 1
+        captured = capsys.readouterr()
+        assert "argv-pw" not in captured.out + captured.err
+        assert keyring_store == {}
+
+    def test_secret_without_value_needs_terminal(self, run_cli, monkeypatch,
+                                                 capsys, keyring_store):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        assert run_cli("config", "set", "email.app_password") == 1
+        assert "stdin" in capsys.readouterr().err
+        assert keyring_store == {}
+
+    def test_get_secret_unset_prints_empty_line(self, run_cli, capsys):
+        assert run_cli("config", "get", "email.app_password") == 0
+        assert capsys.readouterr().out == "\n"
+
+    # ── path ──
+
+    def test_path_honors_config_dir(self, run_cli, config_path, capsys):
+        assert run_cli("config", "path") == 0
+        assert capsys.readouterr().out == f"{config_path}\n"
+
+    def test_path_honors_env(self, monkeypatch, tmp_path, capsys, isolated_home):
+        target = tmp_path / "elsewhere"
+        monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(target))
+        monkeypatch.setattr(sys, "argv", ["memanga", "config", "path"])
+        from memanga import cli
+        cli.main()
+        assert capsys.readouterr().out == f"{target.absolute() / 'config.yaml'}\n"
+
+    def test_path_and_edit_run_on_broken_config(self, run_cli, config_path,
+                                                capsys, editor):
+        config_path.write_text("manga: [unclosed\n", encoding="utf-8")
+        assert run_cli("config", "path") == 0
+        assert capsys.readouterr().out == f"{config_path}\n"
+        assert run_cli("config", "get", "delivery.mode") == 1
+        assert "cannot load config file" in capsys.readouterr().err
+        editor("manga: []\n")
+        assert run_cli("config", "edit") == 0
+        assert config_path.read_text(encoding="utf-8") == "manga: []\n"
+        assert run_cli("config", "get", "delivery.mode") == 0
+
+    # ── edit ──
+
+    def test_edit_needs_terminal(self, run_cli, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        assert run_cli("config", "edit") == 1
+        assert "needs a terminal" in capsys.readouterr().err
+
+    def test_edit_needs_editor(self, run_cli, monkeypatch, capsys, tty):
+        monkeypatch.delenv("VISUAL", raising=False)
+        monkeypatch.delenv("EDITOR", raising=False)
+        assert run_cli("config", "edit") == 1
+        assert "$VISUAL or $EDITOR" in capsys.readouterr().err
+
+    def test_edit_runs_editor_and_accepts_valid_file(self, run_cli, config,
+                                                     config_path, editor):
+        calls = editor("delivery:\n  output_format: cbz\n")
+        assert run_cli("config", "edit") == 0
+        assert calls == [["fake-editor", "--wait", str(config_path)]]
+        assert config.get("delivery.output_format") == "cbz"
+
+    def test_edit_prefers_visual(self, run_cli, monkeypatch, editor):
+        calls = editor()
+        monkeypatch.setenv("VISUAL", "visual-editor")
+        assert run_cli("config", "edit") == 0
+        assert calls[0][0] == "visual-editor"
+
+    def test_edit_creates_missing_file_first(self, run_cli, config_path, editor):
+        editor()
+        assert not config_path.exists()
+        assert run_cli("config", "edit") == 0
+        assert config_path.exists()
+
+    @pytest.mark.parametrize("text,needle", [
+        ("manga: [unclosed\n", "is not valid"),
+        ("- a\n- list\n", "is not valid"),
+        ("email:\n  smtp_port: abc\n", "email.smtp_port"),
+        ("cron:\n  time: 7:30\n", "cron.time"),  # YAML 1.1 reads an int
+        # Sections that are not mappings: loading would hide them.
+        ("delivery:\n  post_processing: oops\n",
+         "delivery.post_processing: expected a section"),
+        ("delivery: 5\n", "delivery: expected a section"),
+        ("email: []\n", "email: expected a section"),
+    ])
+    def test_edit_reports_invalid_result(self, run_cli, config_path, capsys,
+                                         editor, text, needle):
+        editor(text)
+        assert run_cli("config", "edit") == 1
+        err = capsys.readouterr().err
+        assert needle in err
+        assert "config edit" in err
+        # Left in place so the user can run `config edit` again.
+        assert config_path.read_text(encoding="utf-8") == text
+
+    def test_edit_editor_failure(self, run_cli, capsys, editor):
+        editor(returncode=3)
+        assert run_cli("config", "edit") == 1
+        assert "status 3" in capsys.readouterr().err
+
+    # ── email ──
+
+    def test_email_shows_settings_without_network(self, run_cli, config,
+                                                  monkeypatch, capsys):
+        config.set("email.sender_email", "sender@example.com")
+        config.set("email.app_password", "file-secret")
+        config.save()
+
+        def boom(*a, **k):
+            raise AssertionError("no SMTP login without --test")
+        monkeypatch.setattr("memanga.doctor.check_smtp", boom)
+        assert run_cli("config", "email") == 0
+        out = capsys.readouterr().out
+        assert "sender@example.com" in out
+        assert "file-secret" not in out
+        assert "--test" in out
+
+    @pytest.mark.parametrize("status,rc", [("ok", 0), ("fail", 1)])
+    def test_email_test_uses_smtp_check(self, run_cli, monkeypatch, capsys,
+                                        status, rc):
+        from memanga import doctor
+        seen = {}
+
+        def fake_smtp(c, s, live=False):
+            seen["live"] = live
+            return doctor.CheckResult("smtp", status, "stub result")
+        monkeypatch.setattr(doctor, "check_smtp", fake_smtp)
+        assert run_cli("config", "email", "--test") == rc
+        assert seen == {"live": True}
+        captured = capsys.readouterr()
+        assert "stub result" in (captured.out if rc == 0 else captured.err)
+
+    # ── compatibility ──
+
+    def test_action_cannot_mix_with_legacy_flag(self, run_cli, config, capsys):
+        assert run_cli("config", "--partial", "on", "get", "delivery.mode") == 2
+        assert "cannot be combined" in capsys.readouterr().err
+        assert config.get("partial_chapters.enabled") is False
+
+    def test_zero_threshold_still_counts_as_a_flag(self, run_cli, capsys):
+        assert run_cli("config", "--partial-threshold", "0", "path") == 2
+
+    def test_bare_config_without_terminal_points_at_actions(self, run_cli,
+                                                            monkeypatch, capsys):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        assert run_cli("config") == 1
+        assert "config set KEY VALUE" in capsys.readouterr().err
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # `sources` — list registered scrapers
 # ─────────────────────────────────────────────────────────────────────────
 

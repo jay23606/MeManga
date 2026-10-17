@@ -28,7 +28,10 @@ from .backup import (
     BackupVersionError,
     validate_backup,
 )
-from .config import Config, get_app_password, set_app_password
+from .config import (CONFIG_KEYS, Config, ConfigError, UnknownConfigKey,
+                     config_key_spec, config_section_problems,
+                     config_value_problem, get_app_password,
+                     parse_config_value, set_app_password)
 from .cron import (build_cron_line, build_task_command, managed_lines,
                    read_crontab,
                    remove_managed_lines, replace_managed_line,
@@ -1469,18 +1472,197 @@ def cmd_status(args):
         console.print(f"[dim]Last check:[/dim] {_esc(last_check)}")
 
 
+def _masked_config_data():
+    """A copy of the loaded config with the app password masked."""
+    import copy
+    display = copy.deepcopy(config._data)
+    pw = display.get("email", {}).get("app_password", "")
+    if pw:
+        display["email"]["app_password"] = "****"
+    return display
+
+
+def _config_error(message: str) -> int:
+    """Plain-text diagnostic on stderr for the scriptable config actions."""
+    sys.stderr.write(f"error: {message}\n")
+    return EXIT_ERROR
+
+
+def _config_value_text(value) -> str:
+    """Render a config value for `config get`: one script-friendly line."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    return str(value)
+
+
+def _config_show(args):
+    if getattr(args, "json", False):
+        _print_json(_masked_config_data())
+        return
+    import yaml
+    console.print(Panel("[bold]Current Configuration[/bold]", border_style="cyan"))
+    console.print(_esc(yaml.dump(_masked_config_data(), default_flow_style=False)))
+
+
+def _config_get(args):
+    try:
+        spec = config_key_spec(args.key)
+    except UnknownConfigKey:
+        return _config_error(f"unknown config key '{args.key}'; "
+                             "see `memanga config get --help` for the keys")
+    if spec.get("secret"):
+        print("****" if get_app_password(config) else "")
+        return
+    print(_config_value_text(config.get(args.key)))
+
+
+def _read_secret(args):
+    """The secret for `config set`, or None after reporting why not.
+
+    The value never comes from argv, where shell history and the
+    process list would keep it.
+    """
+    if args.value == "-":
+        return sys.stdin.readline().rstrip("\r\n")
+    if args.value is not None:
+        _config_error(f"{args.key} is not read from the command line; pass '-' "
+                      "and send the value on stdin")
+        return None
+    if not _stdin_is_tty():
+        _config_error(f"{args.key} needs a value; pass '-' and send it on stdin")
+        return None
+    return Prompt.ask("App password", password=True)
+
+
+def _config_set(args):
+    try:
+        spec = config_key_spec(args.key)
+    except UnknownConfigKey:
+        return _config_error(f"unknown config key '{args.key}'; "
+                             "see `memanga config set --help` for the keys")
+    if spec.get("read_only"):
+        return _config_error(f"{args.key} is managed by `{spec['read_only']}`")
+
+    if spec.get("secret"):
+        secret = _read_secret(args)
+        if secret is None:
+            return EXIT_ERROR
+        set_app_password(config, secret)
+        console.print(f"[green]✅ {_esc(args.key)} updated[/green]")
+        return
+
+    if args.value is None:
+        return _config_error(f"config set {args.key} needs a VALUE")
+    try:
+        value = parse_config_value(args.key, args.value)
+    except ValueError as e:
+        return _config_error(f"invalid value for {args.key}: {e}")
+    config.set(args.key, value)
+    config.save()
+    console.print(f"[green]✅ {_esc(args.key)} = {_esc(_config_value_text(value))}[/green]")
+
+
+def _config_edit(args):
+    import shlex
+    import yaml
+    if not _stdin_is_tty():
+        return _non_interactive_error(
+            "config edit needs a terminal; use `config set KEY VALUE` instead"
+        )
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        return _config_error("set $VISUAL or $EDITOR to choose an editor")
+    path = config.config_path
+    if not path.exists():
+        config.save()  # start from the defaults
+    try:
+        command = shlex.split(editor, posix=os.name != "nt")
+        result = subprocess.run(command + [str(path)])
+    except (OSError, ValueError) as e:
+        return _config_error(f"could not start editor '{editor}': {e}")
+    if result.returncode != 0:
+        return _config_error(
+            f"editor exited with status {result.returncode}; {path} was not checked"
+        )
+
+    try:
+        edited = Config(config.config_dir)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ConfigError) as e:
+        return _config_error(
+            f"{path} is not valid: {e}\nRun `memanga config edit` again to fix it."
+        )
+    # Loading merges defaults over sections that are not mappings, so
+    # check the file's own structure before the merged values.
+    problems = config_section_problems(raw)
+    for key in CONFIG_KEYS:
+        value = edited.get(key)
+        if value is None:
+            continue  # unset: the default applies
+        problem = config_value_problem(key, value)
+        if problem:
+            problems.append(f"{key}: {problem}")
+    if problems:
+        for problem in problems:
+            sys.stderr.write(f"error: {problem}\n")
+        sys.stderr.write("Run `memanga config edit` again to fix it.\n")
+        return EXIT_ERROR
+    console.print(f"[green]✅ {_esc(path)} is valid[/green]")
+
+
+def _config_email(args):
+    password_set = bool(get_app_password(config))
+    table = Table(title="Email delivery", box=box.SIMPLE, show_header=False)
+    table.add_column(style="dim", width=18)
+    table.add_column(style="white")
+    table.add_row("Delivery mode", _esc(config.delivery_mode))
+    for label, key in (("Kindle email", "email.kindle_email"),
+                       ("Sender email", "email.sender_email")):
+        value = config.get(key)
+        table.add_row(label, _esc(value) if value else "[red]not set[/red]")
+    table.add_row("SMTP server", _esc(config.get("email.smtp_server", "smtp.gmail.com")))
+    table.add_row("SMTP port", _esc(config.get("email.smtp_port", 587)))
+    table.add_row("App password", "set" if password_set else "[red]not set[/red]")
+    console.print(table)
+    if not args.test:
+        console.print("[dim]Pass --test to try logging in to the SMTP server.[/dim]")
+        return
+
+    with console.status("[dim]Logging in to the SMTP server...[/dim]"):
+        result = doctor.check_smtp(config, state, live=True)
+    if result.status == doctor.OK:
+        console.print(f"[green]✅ {_esc(result.message)}[/green]")
+        return
+    return _error(f"[red]❌ {_esc(result.message)}[/red]")
+
+
+_CONFIG_ACTIONS = {
+    "show": _config_show,
+    "get": _config_get,
+    "set": _config_set,
+    "path": lambda args: print(config.config_path),
+    "edit": _config_edit,
+    "email": _config_email,
+}
+
+# Actions that must work on a config.yaml that cannot be loaded, so the
+# user can find and fix it.
+CONFIG_ACTIONS_ON_BROKEN_CONFIG = ("path", "edit")
+
+
 def cmd_config(args):
     """Configure MeManga settings."""
+    action = getattr(args, "config_action", None)
+    if action:
+        return _CONFIG_ACTIONS[action](args)
+
     if args.show:
-        # Show current config (mask sensitive fields)
-        import copy
-        import yaml
-        display = copy.deepcopy(config._data)
-        pw = display.get("email", {}).get("app_password", "")
-        if pw:
-            display["email"]["app_password"] = "****"
-        console.print(Panel("[bold]Current Configuration[/bold]", border_style="cyan"))
-        console.print(_esc(yaml.dump(display, default_flow_style=False)))
+        _config_show(args)
         return
 
     # Non-interactive config for partial-chapter tolerance (issue #86).
@@ -1523,7 +1705,8 @@ def cmd_config(args):
 
     if not _stdin_is_tty():
         return _non_interactive_error(
-            "interactive config needs a terminal; use --show or a config flag"
+            "interactive config needs a terminal; use `config show` (or --show), "
+            "`config set KEY VALUE` or a config flag"
         )
 
     console.print(Panel("[bold]⚙️  Configure MeManga[/bold]", border_style="yellow"))
@@ -2641,6 +2824,7 @@ Examples:
   memanga doctor                        # Diagnose setup problems
   memanga cron install                  # Set up daily checks
   memanga config                        # Configure settings
+  memanga config set KEY VALUE          # Change one setting
   memanga --config-dir DIR status       # Use another config directory
 """
     if not _cli_only:
@@ -2820,6 +3004,30 @@ Examples:
         help="Persist the max %% of pages allowed to fail (0-100)",
     )
     p_config.set_defaults(func=cmd_config)
+    # Scriptable actions (issue #353). Without one, `config` keeps the
+    # flags above and the interactive wizard.
+    config_keys_help = "KEY is one of: " + ", ".join(CONFIG_KEYS)
+    config_actions = p_config.add_subparsers(dest="config_action", title="actions", metavar="ACTION")
+    p_cfg_show = config_actions.add_parser(
+        "show", help="Show the current config (app password masked)")
+    p_cfg_show.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    p_cfg_get = config_actions.add_parser(
+        "get", help="Print one setting's value", description=config_keys_help)
+    p_cfg_get.add_argument("key", metavar="KEY")
+    p_cfg_set = config_actions.add_parser(
+        "set", help="Change one setting",
+        description=config_keys_help + ". For email.app_password pass '-' "
+                    "and send the value on stdin, or omit VALUE on a terminal "
+                    "to be prompted.")
+    p_cfg_set.add_argument("key", metavar="KEY")
+    p_cfg_set.add_argument("value", nargs="?", metavar="VALUE")
+    config_actions.add_parser("path", help="Print the config file path")
+    config_actions.add_parser(
+        "edit", help="Open config.yaml in $VISUAL or $EDITOR, then check it")
+    p_cfg_email = config_actions.add_parser(
+        "email", help="Show email delivery settings (app password masked)")
+    p_cfg_email.add_argument("--test", action="store_true",
+                             help="Log in to the configured SMTP server (network)")
     
     # cron
     p_cron = subparsers.add_parser("cron", help="Manage cron job")
@@ -2931,6 +3139,18 @@ Examples:
         if target and args.title and target != args.title:
             p_failed.error("give the target once: TARGET or -t/--title")
 
+    if args.command == "config" and args.config_action:
+        legacy = [flag for flag, value in (
+            ("--show", args.show),
+            ("--mangadex-quality", args.mangadex_quality),
+            ("--mangadex-remove-group", args.mangadex_remove_group),
+            ("--partial", args.partial),
+            ("--partial-threshold", args.partial_threshold),
+        ) if value is not None and value is not False]
+        if legacy:
+            p_config.error(f"{legacy[0]} cannot be combined with the "
+                           f"'{args.config_action}' action")
+
     # The GUI builds its own Config/State under the default root.
     if args.gui and args.config_dir:
         parser.error("--config-dir is not supported with --gui")
@@ -2938,9 +3158,14 @@ Examples:
         None if args.gui else resolve_config_dir(args.config_dir)
     ))
 
-    # Only doctor may run on fallback defaults; anything else could act
-    # on an empty manga list or overwrite the user's broken config.
-    if config.load_error and args.command != "doctor":
+    # Only doctor and `config path/edit` may run on fallback defaults;
+    # anything else could act on an empty manga list or overwrite the
+    # user's broken config.
+    broken_config_ok = args.command == "doctor" or (
+        args.command == "config"
+        and getattr(args, "config_action", None) in CONFIG_ACTIONS_ON_BROKEN_CONFIG
+    )
+    if config.load_error and not broken_config_ok:
         sys.stderr.write(
             f"error: cannot load config file {config.config_path}: {config.load_error}\n"
             "Fix or move the file, then retry. Run `memanga doctor` for details.\n"
