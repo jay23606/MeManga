@@ -26,7 +26,9 @@ from rich import box
 from .backup import (
     EXPORT_VERSION,
     BackupVersionError,
+    merge_backup_state,
     validate_backup,
+    validate_backup_contents,
 )
 from .config import (CONFIG_KEYS, Config, ConfigError, UnknownConfigKey,
                      config_key_spec, config_section_problems,
@@ -2255,7 +2257,11 @@ def cmd_search(args):
 
 
 def cmd_export(args):
-    """Export manga list and download state to JSON."""
+    """Export manga list and download state to JSON.
+
+    Issue #354: ``-`` writes the JSON to stdout (and nothing else, so it
+    can be piped); the summary goes to stderr.
+    """
     manga_list = config.get("manga", [])
     manga_state = state.get("manga", {})
 
@@ -2267,73 +2273,163 @@ def cmd_export(args):
     }
 
     output_file = args.file or "memanga_export.json"
-    output_path = Path(output_file)
 
-    with open(output_path, "w") as f:
-        json.dump(export_data, f, indent=2, default=str)
+    if output_file == "-":
+        json.dump(export_data, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        err_console.print(f"[green]Exported {len(manga_list)} manga to stdout[/green]")
+        return None
+
+    output_path = Path(output_file)
+    try:
+        with open(output_path, "w") as f:
+            json.dump(export_data, f, indent=2, default=str)
+    except OSError as exc:
+        return _error(f"[red]Cannot export:[/red] {_esc(exc)}")
 
     console.print(f"[green]Exported {len(manga_list)} manga to [cyan]{_esc(output_path)}[/cyan][/green]")
 
 
+def _plan_import_merge(existing_manga, imported_manga):
+    """Work out a merge import without touching config or state.
+
+    Returns (merged_list, added_titles, skipped_titles, state_title_aliases).
+    ``merged_list`` is a new list; ``existing_manga`` is left as-is so a
+    dry run can't leak into the live config (Config.get returns its own
+    object).
+    """
+    merged = list(existing_manga)
+    existing_titles = {
+        m["title"].lower(): m["title"]
+        for m in merged
+    }
+    state_title_aliases = {}
+    added = []
+    skipped = []
+    for m in imported_manga:
+        title = m["title"]
+        title_key = title.lower()
+        existing_title = existing_titles.get(title_key)
+        if existing_title is not None:
+            if title != existing_title:
+                state_title_aliases[title] = existing_title
+            skipped.append(title)
+            continue
+        merged.append(m)
+        existing_titles[title_key] = title
+        added.append(title)
+    return merged, added, skipped, state_title_aliases
+
+
 def cmd_import(args):
-    """Import manga list and download state from JSON."""
-    import_path = Path(args.file)
+    """Import manga list and download state from JSON.
 
-    if not import_path.exists():
-        return _error(f"[red]File not found:[/red] {_esc(import_path)}")
+    Issue #354: ``-`` reads the JSON from stdin, ``--dry-run`` reports
+    what would change without writing, and ``--replace`` needs ``--yes``
+    or an interactive confirmation. The whole payload is validated
+    before config or state is touched.
+    """
+    # getattr: the TUI builds its own Namespace without these flags.
+    dry_run = getattr(args, "dry_run", False)
+    yes = getattr(args, "yes", False)
+    from_stdin = args.file == "-"
 
-    with open(import_path, "r") as f:
-        import_data = json.load(f)
+    if from_stdin:
+        source_label = "stdin"
+        try:
+            raw = sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return _error(f"[red]Cannot import:[/red] {_esc(exc)}")
+    else:
+        import_path = Path(args.file)
+        source_label = str(import_path)
+        if not import_path.exists():
+            return _error(f"[red]File not found:[/red] {_esc(import_path)}")
+        try:
+            with open(import_path, "r") as f:
+                raw = f.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            return _error(f"[red]Cannot import:[/red] {_esc(exc)}")
+
+    try:
+        import_data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _error(f"[red]Cannot import:[/red] invalid JSON in {_esc(source_label)} ({_esc(exc)})")
 
     try:
         import_data = validate_backup(import_data)
+        imported_manga, imported_state = validate_backup_contents(import_data)
     except BackupVersionError as exc:
         return _error(f"[red]Cannot import:[/red] {_esc(exc)}")
 
-    if "manga" not in import_data:
-        return _error("[red]Invalid export file (missing 'manga' key)[/red]")
-
-    imported_manga = import_data["manga"]
-    imported_state = import_data.get("state", {})
-
     if args.replace:
+        current_count = len(config.get("manga", []))
+        if dry_run:
+            console.print(
+                f"[cyan]Dry run:[/cyan] would replace {current_count} manga with "
+                f"{len(imported_manga)} from {_esc(source_label)} "
+                f"(state for {len(imported_state)} titles); nothing was changed"
+            )
+            return None
+        if not yes:
+            # stdin already carried the backup, so it can't answer a prompt.
+            if from_stdin or not _stdin_is_tty():
+                return _non_interactive_error(
+                    f"refusing to replace {current_count} manga and all download "
+                    "state without confirmation; pass --yes (or --dry-run to preview)"
+                )
+            if not Confirm.ask(
+                    f"Replace all {current_count} manga and download state with "
+                    f"{len(imported_manga)} manga from [cyan]{_esc(source_label)}[/cyan]?",
+                    default=False):
+                console.print("[yellow]Import cancelled; nothing was changed.[/yellow]")
+                return None
         # Full replace
         config.set("manga", imported_manga)
         config.save()
         state.set("manga", imported_state)
         console.print(f"[green]Replaced with {len(imported_manga)} manga from import[/green]")
-    else:
-        # Merge mode: skip duplicates, merge chapter lists
-        existing_manga = config.get("manga", [])
-        existing_titles = {
-            m["title"].lower(): m["title"]
-            for m in existing_manga
-        }
-        state_title_aliases = {}
-        added = 0
-        skipped = 0
-        for m in imported_manga:
-            title = m["title"]
-            title_key = title.lower()
-            existing_title = existing_titles.get(title_key)
-            if existing_title is not None:
-                if title != existing_title:
-                    state_title_aliases[title] = existing_title
-                skipped += 1
-                continue
-            existing_manga.append(m)
-            existing_titles[title_key] = title
-            added += 1
+        return None
 
-        config.set("manga", existing_manga)
-        config.save()
-        state.merge_missing_manga_state(
+    # Merge mode: skip duplicates, merge chapter lists
+    merged_manga, added, skipped, state_title_aliases = _plan_import_merge(
+        config.get("manga", []), imported_manga,
+    )
+
+    # Rehearse the state merge before anything is saved (and before a dry
+    # run reports success), so a backup that still can't merge with local
+    # state fails with nothing written instead of leaving config imported
+    # and state not (issue #354).
+    try:
+        merge_backup_state(
+            state.get("manga", {}),
             imported_state,
-            merge_existing_downloaded=True,
             title_aliases=state_title_aliases,
         )
+    except (TypeError, ValueError, AttributeError) as exc:
+        return _error(f"[red]Cannot import:[/red] backup state does not merge with local state ({_esc(exc)})")
 
-        console.print(f"[green]Imported: {added} added, {skipped} skipped (duplicate)[/green]")
+    if dry_run:
+        console.print(
+            f"[cyan]Dry run:[/cyan] {len(added)} added, {len(skipped)} skipped "
+            f"(duplicate) from {_esc(source_label)}; nothing was changed"
+        )
+        for title in added:
+            console.print(f"  [green]+[/green] {_esc(title)}")
+        for title in skipped:
+            console.print(f"  [dim]= {_esc(title)} (already tracked; state merged)[/dim]")
+        return None
+
+    config.set("manga", merged_manga)
+    config.save()
+    state.merge_missing_manga_state(
+        imported_state,
+        merge_existing_downloaded=True,
+        title_aliases=state_title_aliases,
+    )
+
+    console.print(f"[green]Imported: {len(added)} added, {len(skipped)} skipped (duplicate)[/green]")
 
 
 def _chapter_order(item):
@@ -2773,7 +2869,9 @@ def cmd_tui(args):
             file_path = Prompt.ask("Import file path")
             if file_path:
                 replace = Confirm.ask("Replace all data? (No = merge)", default=False)
-                cmd_import(argparse.Namespace(file=file_path, replace=replace))
+                # Answering yes above is the explicit --replace confirmation.
+                cmd_import(argparse.Namespace(file=file_path, replace=replace,
+                                              yes=replace, dry_run=False))
 
         console.print()
         Prompt.ask("[dim]Press Enter to continue[/dim]")
@@ -3052,13 +3150,15 @@ Examples:
 
     # export
     p_export = subparsers.add_parser("export", help="Export manga list and state to JSON")
-    p_export.add_argument("file", nargs="?", default="memanga_export.json", help="Output file (default: memanga_export.json)")
+    p_export.add_argument("file", nargs="?", default="memanga_export.json", help="Output file, or - for stdout (default: memanga_export.json)")
     p_export.set_defaults(func=cmd_export)
 
     # import
     p_import = subparsers.add_parser("import", help="Import manga list and state from JSON")
-    p_import.add_argument("file", help="JSON file to import")
-    p_import.add_argument("--replace", action="store_true", help="Replace all data instead of merging")
+    p_import.add_argument("file", help="JSON file to import, or - for stdin")
+    p_import.add_argument("--replace", action="store_true", help="Replace all data instead of merging (asks first; see --yes)")
+    p_import.add_argument("--dry-run", action="store_true", help="Validate the backup and show what would change, without writing")
+    p_import.add_argument("-y", "--yes", action="store_true", help="Confirm --replace without prompting (required when not interactive or reading stdin)")
     p_import.set_defaults(func=cmd_import)
 
     # failed

@@ -301,7 +301,7 @@ For a host cron job, run Compose from the repository directory:
 | `cron install [--time 06:00]` | Schedule a daily `check --auto --quiet` job (`--auto` is an alias of `--download`) |
 | `cron status` / `cron remove` | Inspect / uninstall the cron job |
 | `sources` | List all 319 supported domains, marking which ones are healthy |
-| `export FILE` / `import FILE` | Back up or restore your library + state as JSON |
+| `export FILE` / `import FILE` | Back up or restore your library + state as JSON (`-` for stdout/stdin; `import --dry-run` previews, `--replace` asks unless `--yes`) |
 | `tui` | Launch the in-terminal interactive view |
 
 TITLE matches an exact title (any case) first, then a partial title that fits only one manga; an ambiguous partial title is refused, and a bare number must match a title exactly. Use `"#N"` to pick the Nth manga from `list`.

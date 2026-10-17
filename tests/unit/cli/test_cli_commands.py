@@ -1525,6 +1525,350 @@ class TestExportImport:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Issue #354 — stdin/stdout streams, --dry-run, --replace confirmation,
+# and validation before anything is written
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestImportExportStreams:
+    LOCAL = [{"title": "Local", "url": "https://mangadex.org/title/local",
+              "source": "mangadex.org", "status": "reading"}]
+    BACKUP = {
+        "version": 1,
+        "manga": [
+            {"title": "Imported", "url": "https://mangadex.org/title/imported",
+             "source": "mangadex.org", "status": "reading"},
+            {"title": "local", "url": "https://mangadex.org/title/other",
+             "source": "mangadex.org", "status": "reading"},
+        ],
+        "state": {"Imported": {"downloaded": ["1"]}},
+    }
+
+    @pytest.fixture
+    def config_dir(self, isolated_home):
+        return isolated_home / ".config" / "memanga"
+
+    @pytest.fixture
+    def seeded(self, config, config_dir):
+        """Library with one manga and some state; returns a snapshot fn
+        of the on-disk config + state so tests can prove nothing moved."""
+        from memanga.state import State
+        config.set("manga", [dict(m) for m in self.LOCAL])
+        config.save()
+        State(config_dir=config_dir).set(
+            "manga", {"Local": {"downloaded": ["5"]}})
+
+        def snapshot():
+            return tuple(
+                (config_dir / name).read_bytes()
+                for name in ("config.yaml", "state.json")
+            )
+        return snapshot
+
+    def _stdin(self, monkeypatch, text):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+
+    def _titles(self, config):
+        return [m["title"] for m in config.get("manga", []) or []]
+
+    # ── export - ──
+
+    def test_export_dash_writes_only_json_to_stdout(
+            self, run_cli, seeded, tmp_path, monkeypatch, capsys):
+        from memanga.backup import EXPORT_VERSION
+        monkeypatch.chdir(tmp_path)
+        capsys.readouterr()
+        assert run_cli("export", "-") == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["version"] == EXPORT_VERSION
+        assert [m["title"] for m in data["manga"]] == ["Local"]
+        assert data["state"]["Local"]["downloaded"] == ["5"]
+        assert "Exported 1 manga" in captured.err
+        assert not (tmp_path / "-").exists()
+
+    def test_export_file_path_unchanged(self, run_cli, seeded, tmp_path, capsys):
+        out = tmp_path / "backup.json"
+        capsys.readouterr()
+        assert run_cli("export", str(out)) == 0
+        assert json.loads(out.read_text())["manga"][0]["title"] == "Local"
+        assert "Exported 1 manga" in capsys.readouterr().out
+
+    def test_export_unwritable_path_errors_cleanly(
+            self, run_cli, seeded, tmp_path, capsys):
+        capsys.readouterr()
+        rc = run_cli("export", str(tmp_path / "missing-dir" / "x.json"))
+        assert rc == 1
+        assert "cannot export" in capsys.readouterr().err.lower()
+
+    # ── import - ──
+
+    def test_import_dash_reads_stdin_and_merges(
+            self, run_cli, config, seeded, monkeypatch, capsys):
+        from memanga import cli
+        self._stdin(monkeypatch, json.dumps(self.BACKUP))
+        assert run_cli("import", "-") == 0
+        assert self._titles(config) == ["Local", "Imported"]
+        assert cli.state.get("manga", {})["Imported"]["downloaded"] == ["1"]
+        assert "1 added, 1 skipped" in capsys.readouterr().out
+
+    def test_export_stdout_roundtrips_through_import_stdin(
+            self, run_cli, config, seeded, monkeypatch, capsys):
+        capsys.readouterr()
+        assert run_cli("export", "-") == 0
+        exported = capsys.readouterr().out
+        config.set("manga", [])
+        config.save()
+        self._stdin(monkeypatch, exported)
+        assert run_cli("import", "-") == 0
+        assert self._titles(config) == ["Local"]
+
+    # ── --dry-run ──
+
+    @pytest.mark.parametrize("from_stdin", [False, True])
+    def test_dry_run_merge_reports_without_writing(
+            self, run_cli, seeded, tmp_path, monkeypatch, capsys, from_stdin):
+        before = seeded()
+        if from_stdin:
+            self._stdin(monkeypatch, json.dumps(self.BACKUP))
+            target = "-"
+        else:
+            target = tmp_path / "b.json"
+            target.write_text(json.dumps(self.BACKUP))
+            target = str(target)
+        capsys.readouterr()
+        assert run_cli("import", target, "--dry-run") == 0
+        out = capsys.readouterr().out
+        assert "Dry run" in out
+        assert "1 added, 1 skipped" in out
+        assert "Imported" in out
+        assert seeded() == before
+
+    def test_dry_run_replace_needs_no_confirmation_and_writes_nothing(
+            self, run_cli, seeded, monkeypatch, capsys):
+        before = seeded()
+        self._stdin(monkeypatch, json.dumps(self.BACKUP))
+        capsys.readouterr()
+        assert run_cli("import", "-", "--replace", "--dry-run") == 0
+        out = capsys.readouterr().out
+        assert "would replace 1 manga with 2" in out
+        assert seeded() == before
+
+    def test_dry_run_still_rejects_invalid_backup(
+            self, run_cli, seeded, monkeypatch, capsys):
+        self._stdin(monkeypatch, json.dumps({"version": 1, "manga": {}}))
+        capsys.readouterr()
+        assert run_cli("import", "-", "--dry-run") == 1
+        assert "manga must be a list" in capsys.readouterr().err
+
+    # ── --replace confirmation ──
+
+    def test_replace_non_interactive_without_yes_refuses(
+            self, run_cli, config, seeded, tmp_path, monkeypatch, capsys):
+        before = seeded()
+        backup = tmp_path / "b.json"
+        backup.write_text(json.dumps(self.BACKUP))
+        self._stdin(monkeypatch, "")  # a pipe, not a terminal
+        capsys.readouterr()
+        assert run_cli("import", str(backup), "--replace") == 1
+        assert "--yes" in capsys.readouterr().err
+        assert seeded() == before
+
+    def test_replace_from_stdin_without_yes_refuses_even_on_tty(
+            self, run_cli, seeded, monkeypatch, capsys):
+        from memanga import cli
+        before = seeded()
+        monkeypatch.setattr("memanga.cli._stdin_is_tty", lambda: True)
+        monkeypatch.setattr(cli.Confirm, "ask", lambda *a, **k: pytest.fail(
+            "must not prompt when the backup came from stdin"))
+        self._stdin(monkeypatch, json.dumps(self.BACKUP))
+        capsys.readouterr()
+        assert run_cli("import", "-", "--replace") == 1
+        assert "--yes" in capsys.readouterr().err
+        assert seeded() == before
+
+    @pytest.mark.parametrize("flag", ["--yes", "-y"])
+    def test_replace_with_yes_replaces(
+            self, run_cli, config, seeded, monkeypatch, flag):
+        from memanga import cli
+        self._stdin(monkeypatch, json.dumps(self.BACKUP))
+        assert run_cli("import", "-", "--replace", flag) == 0
+        assert self._titles(config) == ["Imported", "local"]
+        assert cli.state.get("manga", {}) == {"Imported": {"downloaded": ["1"]}}
+
+    @pytest.mark.parametrize("answer", [True, False])
+    def test_replace_interactive_prompt(
+            self, run_cli, config, seeded, tmp_path, monkeypatch, capsys, answer):
+        from memanga import cli
+        before = seeded()
+        backup = tmp_path / "b.json"
+        backup.write_text(json.dumps(self.BACKUP))
+        monkeypatch.setattr("memanga.cli._stdin_is_tty", lambda: True)
+        asked = []
+
+        def _confirm(prompt, *a, **k):
+            asked.append((prompt, k.get("default")))
+            return answer
+        monkeypatch.setattr(cli.Confirm, "ask", _confirm)
+        assert run_cli("import", str(backup), "--replace") == 0
+        assert len(asked) == 1 and asked[0][1] is False
+        if answer:
+            assert self._titles(config) == ["Imported", "local"]
+        else:
+            assert "cancelled" in capsys.readouterr().out.lower()
+            assert seeded() == before
+
+    # ── validation before writing ──
+
+    @pytest.mark.parametrize("payload, message", [
+        ("{not json", "invalid json"),
+        (json.dumps({"version": 1}), "missing 'manga'"),
+        (json.dumps({"version": 1, "manga": "x"}), "manga must be a list"),
+        (json.dumps({"version": 1, "manga": ["x"]}), "entry 1 must be an object"),
+        (json.dumps({"version": 1, "manga": [{"url": "u"}]}), "entry 1 has no title"),
+        (json.dumps({"version": 1, "manga": [{"title": "  "}]}), "entry 1 has no title"),
+        (json.dumps({"version": 1, "manga": [{"title": "Ok"}, {"title": 3}]}),
+         "entry 2 has no title"),
+        (json.dumps({"version": 1, "manga": [], "state": {"T": []}}),
+         "state for 'T' must be an object"),
+        (json.dumps({"version": 2, "manga": []}), "newer"),
+    ])
+    @pytest.mark.parametrize("replace", [False, True])
+    def test_invalid_backup_rejected_before_any_write(
+            self, run_cli, seeded, monkeypatch, capsys, payload, message, replace):
+        before = seeded()
+        self._stdin(monkeypatch, payload)
+        argv = ["import", "-"] + (["--replace", "--yes"] if replace else [])
+        capsys.readouterr()
+        assert run_cli(*argv) == 1
+        err = capsys.readouterr().err.lower()
+        assert "cannot import" in err
+        assert message.lower() in err
+        assert seeded() == before
+
+    @pytest.mark.parametrize("field, value", [
+        ("downloaded", 5),
+        ("downloaded", "12"),
+        ("downloaded", [{"n": 1}]),
+        ("read_chapters", {"1": True}),
+        ("external_chapters", 3),
+        ("available_chapters", "x"),
+        ("available_chapters", ["1"]),
+        ("failed_chapters", ["4"]),
+        ("reading_progress", "2"),
+        ("new_chapters_available", "3"),
+        ("last_chapter", ["9"]),
+        ("last_updated", 20260101),
+    ])
+    @pytest.mark.parametrize("state_title", ["Local", "local", "Imported"])
+    @pytest.mark.parametrize("mode", [(), ("--dry-run",), ("--replace", "--yes")])
+    def test_malformed_nested_state_rejected_before_any_write(
+            self, run_cli, seeded, monkeypatch, capsys,
+            field, value, state_title, mode):
+        """Issue #354: a merge onto an existing title (exact or
+        case-alias) with a malformed state field used to save config.yaml
+        and then crash in the state merge, leaving a partial import."""
+        before = seeded()
+        payload = dict(self.BACKUP)
+        payload["state"] = {state_title: {"downloaded": ["1"], field: value}}
+        self._stdin(monkeypatch, json.dumps(payload))
+        capsys.readouterr()
+        assert run_cli("import", "-", *mode) == 1
+        err = capsys.readouterr().err
+        assert "Cannot import" in err
+        assert field in err
+        assert seeded() == before
+
+    @pytest.mark.parametrize("value", [[], None])
+    @pytest.mark.parametrize("state_title", ["Local", "Imported"])
+    @pytest.mark.parametrize("mode", [(), ("--dry-run",), ("--replace", "--yes")])
+    def test_malformed_reader_positions_rejected_before_any_write(
+            self, run_cli, seeded, monkeypatch, capsys, value, state_title, mode):
+        """The reader restores positions with ``.get``, so a list or null
+        ``reader_positions`` must not be imported (merge or replace)."""
+        before = seeded()
+        payload = dict(self.BACKUP)
+        payload["state"] = {state_title: {"reader_positions": value}}
+        self._stdin(monkeypatch, json.dumps(payload))
+        capsys.readouterr()
+        assert run_cli("import", "-", *mode) == 1
+        err = capsys.readouterr().err
+        assert "Cannot import" in err
+        assert "reader_positions" in err
+        assert seeded() == before
+
+    @pytest.mark.parametrize("mode", [(), ("--replace", "--yes")])
+    def test_valid_reader_positions_are_imported(
+            self, run_cli, seeded, monkeypatch, mode):
+        from memanga import cli
+        position = {"mode": "paged", "page_index": 4,
+                    "updated_at": "2026-01-01T00:00:00"}
+        payload = dict(self.BACKUP)
+        payload["state"] = {"Imported": {"reader_positions": {"3": position}}}
+        self._stdin(monkeypatch, json.dumps(payload))
+        assert run_cli("import", "-", *mode) == 0
+        assert cli.state.get_reader_position("Imported", "3") == position
+
+    def test_state_that_cannot_merge_with_local_state_writes_nothing(
+            self, run_cli, seeded, config_dir, monkeypatch, capsys):
+        """Belt and braces: a valid backup that still can't merge with the
+        local entry (here a corrupt local count) fails before config.yaml
+        is saved."""
+        from memanga.state import State
+        State(config_dir=config_dir).set(
+            "manga", {"Local": {"downloaded": ["5"],
+                                "new_chapters_available": "corrupt"}})
+        before = tuple((config_dir / n).read_bytes()
+                       for n in ("config.yaml", "state.json"))
+        payload = dict(self.BACKUP)
+        payload["state"] = {"local": {"new_chapters_available": 2}}
+        self._stdin(monkeypatch, json.dumps(payload))
+        capsys.readouterr()
+        assert run_cli("import", "-") == 1
+        assert "does not merge with local state" in capsys.readouterr().err
+        assert tuple((config_dir / n).read_bytes()
+                     for n in ("config.yaml", "state.json")) == before
+
+    def test_well_formed_nested_state_still_merges_onto_existing_title(
+            self, run_cli, config, seeded, monkeypatch):
+        from memanga import cli
+        payload = dict(self.BACKUP)
+        payload["state"] = {"local": {
+            "downloaded": ["6", 7, 7.5],
+            "read_chapters": ["6"],
+            "external_chapters": [],
+            "available_chapters": [{"number": "6", "url": "u"}],
+            "failed_chapters": {},
+            "reading_progress": {"last_chapter": "6", "last_read": None},
+            "new_chapters_available": 1,
+            "last_chapter": "7.5",
+            "last_updated": None,
+            "created": "2026-01-01T00:00:00",
+        }}
+        self._stdin(monkeypatch, json.dumps(payload))
+        assert run_cli("import", "-") == 0
+        assert self._titles(config) == ["Local", "Imported"]
+        merged = cli.state.get("manga", {})["Local"]
+        assert merged["downloaded"] == ["5", "6", "7", "7.5"]
+        assert merged["new_chapters_available"] == 1
+
+    def test_invalid_json_file_rejected_without_traceback(
+            self, run_cli, seeded, tmp_path, capsys):
+        before = seeded()
+        backup = tmp_path / "broken.json"
+        backup.write_text("{")
+        capsys.readouterr()
+        assert run_cli("import", str(backup)) == 1
+        assert "invalid json" in capsys.readouterr().err.lower()
+        assert seeded() == before
+
+    def test_missing_file_message_unchanged(self, run_cli, seeded, tmp_path, capsys):
+        capsys.readouterr()
+        assert run_cli("import", str(tmp_path / "nope.json")) == 1
+        assert "file not found" in capsys.readouterr().err.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # `search` — live multi-source search (scrapers mocked, no network)
 # ─────────────────────────────────────────────────────────────────────────
 
