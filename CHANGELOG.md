@@ -7,6 +7,11 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #357 `memanga path TARGET` prints the download folder of a tracked manga
+  (only the absolute path, so `cd "$(memanga path TARGET)"` works) and
+  `memanga open TARGET` opens it in the system file manager. A manga with
+  nothing downloaded yet, or a missing file opener such as `xdg-open`, is
+  reported on stderr with the folder path and exits 1; nothing is created.
 - #356 `memanga read TARGET CHAPTER...` and `memanga unread TARGET
   CHAPTER...` mark chapters read or unread in the same read state the
   desktop reader, Library and chapter list use. `read --all` marks every
