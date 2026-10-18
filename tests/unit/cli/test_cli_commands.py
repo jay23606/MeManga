@@ -136,7 +136,7 @@ class TestCompletionCommand:
         for name in ("list", "ls", "add", "remove", "rm", "update",
                      "edit", "check", "status", "config", "cron", "sources",
                      "search", "export", "import", "failed", "doctor", "tui",
-                     "completion"):
+                     "completion", "path", "open"):
             assert name in tokens, name
         for option in ("--config-dir", "--version"):
             assert option in tokens
@@ -4808,3 +4808,261 @@ class TestReadUnread:
         out = capsys.readouterr().out
         assert "read,unread" in out
         assert "Mark chapters of a manga as read" in out
+
+
+class _FakeOpener:
+    """Stands in for subprocess.Popen in `open` tests; records the call."""
+
+    calls = []
+    returncode = 0
+    still_running = False
+
+    def __init__(self, argv, **kwargs):
+        type(self).calls.append((argv, kwargs))
+
+    def wait(self, timeout=None):
+        import subprocess
+        if type(self).still_running:
+            raise subprocess.TimeoutExpired("opener", timeout)
+        return type(self).returncode
+
+
+class TestPathOpen:
+    """Issue #357: `path TARGET` prints and `open TARGET` opens the
+    manga's download folder; a manga with nothing downloaded is an error."""
+
+    @pytest.fixture(autouse=True)
+    def wide_console(self, monkeypatch):
+        from rich.console import Console
+        from memanga import cli
+        monkeypatch.setattr(cli, "console", Console(width=250))
+        monkeypatch.setattr(cli, "err_console", Console(width=250, stderr=True))
+
+    @pytest.fixture
+    def downloads(self, config, tmp_path):
+        root = tmp_path / "downloads"
+        root.mkdir()
+        config.set("delivery.download_dir", str(root))
+        config.set("manga", [
+            {"title": t, "source": "mangadex.org", "url": f"u{i}", "status": "reading"}
+            for i, t in enumerate(("One Piece", "Re:Zero", "Berserk"))
+        ])
+        config.save()
+        (root / "One Piece").mkdir()
+        (root / "One Piece" / "One Piece - Chapter 1.cbz").write_text("a")
+        # Image formats: one folder of pages per chapter.
+        (root / "ReZero" / "Chapter 1").mkdir(parents=True)
+        (root / "ReZero" / "Chapter 1" / "001.jpg").write_text("img")
+        return root
+
+    @pytest.fixture
+    def opener(self, monkeypatch):
+        import subprocess
+        from memanga import cli
+        _FakeOpener.calls = []
+        _FakeOpener.returncode = 0
+        _FakeOpener.still_running = False
+        monkeypatch.setattr(subprocess, "Popen", _FakeOpener)
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+        monkeypatch.setattr(cli.shutil, "which",
+                            lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        return _FakeOpener
+
+    def test_path_prints_only_the_folder(self, run_cli, downloads, capsys):
+        capsys.readouterr()
+        assert run_cli("path", "One Piece") == 0
+        captured = capsys.readouterr()
+        assert captured.out == f"{downloads / 'One Piece'}\n"
+        assert captured.err == ""
+
+    def test_path_uses_list_number_and_sanitized_title(self, run_cli, downloads, capsys):
+        capsys.readouterr()
+        assert run_cli("path", "#2") == 0
+        assert capsys.readouterr().out == f"{downloads / 'ReZero'}\n"
+        assert run_cli("path", "one") == 0  # unique partial title
+        assert capsys.readouterr().out == f"{downloads / 'One Piece'}\n"
+
+    def test_path_is_absolute_for_relative_download_dir(
+            self, run_cli, config, downloads, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        config.set("delivery.download_dir", "downloads")
+        config.save()
+        capsys.readouterr()
+        assert run_cli("path", "One Piece") == 0
+        out = capsys.readouterr().out.rstrip("\n")
+        assert os.path.isabs(out)
+        assert out == str(downloads / "One Piece")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_path_keeps_symlinked_folder(self, run_cli, downloads, tmp_path, capsys):
+        elsewhere = tmp_path / "other-disk" / "Berserk"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "Berserk - Chapter 1.cbz").write_text("b")
+        (downloads / "Berserk").symlink_to(elsewhere, target_is_directory=True)
+        capsys.readouterr()
+        assert run_cli("path", "Berserk") == 0
+        assert capsys.readouterr().out == f"{downloads / 'Berserk'}\n"
+
+    @pytest.mark.parametrize("command", ["path", "open"])
+    def test_missing_downloads_is_an_error(self, run_cli, downloads, opener,
+                                           capsys, command):
+        capsys.readouterr()
+        assert run_cli(command, "Berserk") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No downloads for Berserk yet" in captured.err
+        assert str(downloads / "Berserk") in captured.err
+        assert "memanga check Berserk --download" in captured.err
+        assert opener.calls == []
+        assert not (downloads / "Berserk").exists()
+
+    @pytest.mark.parametrize("command", ["path", "open"])
+    def test_empty_folder_is_no_downloads(self, run_cli, downloads, opener,
+                                          capsys, command):
+        # Created by hand or left behind: sub-folders and hidden files only.
+        (downloads / "Berserk" / "Chapter 1").mkdir(parents=True)
+        (downloads / "Berserk" / ".DS_Store").write_text("x")
+        before = sorted(p.relative_to(downloads) for p in downloads.rglob("*"))
+        capsys.readouterr()
+        assert run_cli(command, "Berserk") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No downloads for Berserk yet" in captured.err
+        assert str(downloads / "Berserk") in captured.err
+        assert opener.calls == []
+        assert sorted(p.relative_to(downloads) for p in downloads.rglob("*")) == before
+
+    @pytest.mark.parametrize("command", ["path", "open"])
+    def test_completely_empty_folder_is_no_downloads(self, run_cli, downloads,
+                                                     opener, capsys, command):
+        (downloads / "Berserk").mkdir()
+        capsys.readouterr()
+        assert run_cli(command, "Berserk") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No downloads for Berserk yet" in captured.err
+        assert opener.calls == []
+        assert list((downloads / "Berserk").iterdir()) == []
+
+    def test_nested_chapter_images_count_as_downloads(self, run_cli, downloads, capsys):
+        capsys.readouterr()
+        assert run_cli("path", "Re:Zero") == 0
+        assert capsys.readouterr().out == f"{downloads / 'ReZero'}\n"
+
+    @pytest.mark.parametrize("platform, hint", [
+        ("linux", "memanga check 'Vinland Saga' --download"),
+        ("win32", 'memanga check "Vinland Saga" --download'),
+    ])
+    def test_recovery_hint_quotes_for_the_platform(
+            self, run_cli, config, downloads, monkeypatch, capsys, platform, hint):
+        from memanga import cli
+        config.set("manga", [{"title": "Vinland Saga", "source": "mangadex.org",
+                              "url": "u9", "status": "reading"}])
+        config.save()
+        monkeypatch.setattr(cli.sys, "platform", platform)
+        capsys.readouterr()
+        assert run_cli("path", "Vinland Saga") == 1
+        assert hint in capsys.readouterr().err
+
+    def test_missing_download_root_is_an_error(self, run_cli, config, downloads,
+                                               tmp_path, capsys):
+        config.set("delivery.download_dir", str(tmp_path / "nowhere"))
+        config.save()
+        capsys.readouterr()
+        assert run_cli("path", "One Piece") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "No downloads for One Piece yet" in captured.err
+        assert not (tmp_path / "nowhere").exists()
+
+    def test_file_instead_of_folder_is_an_error(self, run_cli, downloads, capsys):
+        (downloads / "Berserk").write_text("not a folder")
+        capsys.readouterr()
+        assert run_cli("path", "Berserk") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Not a folder" in captured.err
+
+    @pytest.mark.parametrize("command", ["path", "open"])
+    def test_target_errors(self, run_cli, downloads, opener, capsys, command):
+        capsys.readouterr()
+        assert run_cli(command, "Naruto") == 1
+        captured = capsys.readouterr()
+        assert captured.out == "" and "Not found" in captured.err
+        assert run_cli(command, "e") == 1  # every title has an "e"
+        assert "Ambiguous" in capsys.readouterr().err
+        assert opener.calls == []
+
+    def test_empty_library(self, run_cli, capsys):
+        capsys.readouterr()
+        assert run_cli("path", "One Piece") == 1
+        assert "No manga tracked" in capsys.readouterr().err
+
+    def test_open_runs_xdg_open_without_shell(self, run_cli, downloads, opener, capsys):
+        import subprocess
+        capsys.readouterr()
+        assert run_cli("open", "One Piece") == 0
+        [(argv, kwargs)] = opener.calls
+        assert argv == ["/usr/bin/xdg-open", str(downloads / "One Piece")]
+        assert not kwargs.get("shell")
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["stdout"] is subprocess.DEVNULL
+        assert "Opened" in capsys.readouterr().out
+
+    def test_open_uses_open_on_macos(self, run_cli, downloads, opener, monkeypatch):
+        from memanga import cli
+        monkeypatch.setattr(cli.sys, "platform", "darwin")
+        assert run_cli("open", "One Piece") == 0
+        assert opener.calls[0][0] == ["open", str(downloads / "One Piece")]
+
+    def test_open_uses_startfile_on_windows(self, run_cli, downloads, opener, monkeypatch):
+        from memanga import cli
+        started = []
+        monkeypatch.setattr(cli.sys, "platform", "win32")
+        monkeypatch.setattr(cli.os, "startfile", started.append, raising=False)
+        assert run_cli("open", "One Piece") == 0
+        assert started == [str(downloads / "One Piece")]
+        assert opener.calls == []
+
+    def test_open_reports_startfile_failure(self, run_cli, downloads, opener,
+                                            monkeypatch, capsys):
+        from memanga import cli
+
+        def fail(path):
+            raise OSError("no association")
+        monkeypatch.setattr(cli.sys, "platform", "win32")
+        monkeypatch.setattr(cli.os, "startfile", fail, raising=False)
+        capsys.readouterr()
+        assert run_cli("open", "One Piece") == 1
+        err = capsys.readouterr().err
+        assert "Could not open the folder" in err and "no association" in err
+
+    def test_open_without_xdg_open(self, run_cli, downloads, opener, monkeypatch, capsys):
+        from memanga import cli
+        monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+        capsys.readouterr()
+        assert run_cli("open", "One Piece") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "xdg-open was not found" in captured.err
+        assert str(downloads / "One Piece") in captured.err
+        assert opener.calls == []
+
+    def test_open_reports_opener_failure(self, run_cli, downloads, opener, capsys):
+        opener.returncode = 4
+        capsys.readouterr()
+        assert run_cli("open", "One Piece") == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "xdg-open exited with status 4" in captured.err
+
+    def test_open_leaves_a_running_opener_alone(self, run_cli, downloads, opener):
+        opener.still_running = True
+        assert run_cli("open", "One Piece") == 0
+        assert len(opener.calls) == 1
+
+    def test_listed_in_help(self, run_cli, capsys):
+        assert run_cli("--help") == 0
+        out = capsys.readouterr().out
+        assert "Print the download folder of a manga" in out
+        assert "Open the download folder of a manga" in out

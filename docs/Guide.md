@@ -1207,6 +1207,8 @@ run import - --replace --yes < memanga_export.json
 | `run read "Title" --all` | Mark every downloaded chapter read |
 | `run unread "Title" 2` | Mark a chapter unread |
 | `run unread "Title" --all` | Mark every chapter unread |
+| `run path "Title"` | Print the manga's download folder (only the path; exits `1` if nothing is downloaded yet) |
+| `run open "Title"` | Open the manga's download folder in the file manager |
 | `run remove "Title"` | Remove a manga |
 | `run update "Title" -u URL` | Change primary source URL |
 | `run update "Title" -b URL` | Change backup source URL |

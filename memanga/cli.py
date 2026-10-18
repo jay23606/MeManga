@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -853,6 +854,137 @@ def cmd_read(args):
         )
     if unchanged:
         console.print(f"[dim]Already {verb}: {_chapter_list_text(unchanged)}[/dim]")
+
+
+# Issue #357: how long `open` waits for the opener to report an error.
+# An opener still running after that has launched the file manager.
+_OPENER_WAIT_SECONDS = 5
+
+
+def _has_downloaded_files(folder: Path) -> bool:
+    """True if ``folder`` holds a file at any depth (issue #357).
+
+    Image formats save each chapter as a sub-folder of pages, so files
+    are searched recursively. Hidden files such as .DS_Store don't
+    count. Read-only: symlinked sub-folders are not followed.
+    """
+    for _, _, files in os.walk(folder):
+        if any(not name.startswith(".") for name in files):
+            return True
+    return False
+
+
+def _manga_download_folder(target):
+    """Resolve TARGET to its download folder for `path` and `open` (#357).
+
+    The folder is ``<download dir>/<sanitized title>``, where downloads
+    are written. Returns (folder, None) when it exists, else (None, exit
+    code) after reporting the problem on stderr. Nothing is created.
+    """
+    from .downloader import _sanitize_filename
+
+    manga_list = config.get("manga", [])
+    if not manga_list:
+        return None, _error("[yellow]No manga tracked.[/yellow]")
+
+    found, _, candidates = _find_manga(target, manga_list)
+    if not found:
+        return None, _target_error(target, candidates)
+
+    title = found["title"]
+    # absolute(), not resolve(): keep a symlinked folder at the path the
+    # user configured. The leading separator also keeps a title such as
+    # "-x" from being read as an option by the opener.
+    folder = (Path(config.download_dir) / _sanitize_filename(title)).absolute()
+    if folder.is_dir():
+        if _has_downloaded_files(folder):
+            return folder, None
+    elif os.path.lexists(folder):
+        err_console.print(
+            f"[red]Not a folder:[/red] {_esc(folder)} (downloads of {_esc(title)})",
+            soft_wrap=True,
+        )
+        return None, EXIT_ERROR
+    if sys.platform == "win32":
+        quoted = subprocess.list2cmdline([title])
+    else:
+        import shlex
+        quoted = shlex.quote(title)
+    err_console.print(f"[yellow]No downloads for {_esc(title)} yet.[/yellow]")
+    err_console.print(f"[dim]Expected folder: {_esc(folder)}[/dim]", soft_wrap=True)
+    err_console.print(
+        f"[dim]Download chapters with: memanga check {_esc(quoted)} --download[/dim]",
+        soft_wrap=True,
+    )
+    return None, EXIT_ERROR
+
+
+def _open_folder(folder: Path) -> Optional[str]:
+    """Open ``folder`` in the OS file manager; return an error or None.
+
+    Same platform split as the GUI's folder buttons, but the folder must
+    already exist and failures are reported instead of swallowed.
+    """
+    if sys.platform == "win32":
+        try:
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        except OSError as e:
+            return str(e)
+        return None
+
+    if sys.platform == "darwin":
+        opener = "open"
+    else:
+        opener = shutil.which("xdg-open")
+        if not opener:
+            return "xdg-open was not found (is a desktop environment installed?)"
+    try:
+        # An argv list, never a shell. stdout stays clean for the caller;
+        # the opener's own stderr explains failures such as no display.
+        proc = subprocess.Popen(
+            [opener, str(folder)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return f"could not run {os.path.basename(opener)}: {e}"
+    try:
+        code = proc.wait(timeout=_OPENER_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Still running: it launched the file manager in the foreground.
+        # Leave it open.
+        return None
+    if code != 0:
+        return f"{os.path.basename(opener)} exited with status {code}"
+    return None
+
+
+def cmd_path(args):
+    """Print the download folder of a tracked manga (issue #357).
+
+    stdout carries only the absolute path, for scripts; a manga with no
+    downloaded files yet is an error, reported on stderr.
+    """
+    folder, code = _manga_download_folder(args.target)
+    if folder is None:
+        return code
+    sys.stdout.write(f"{folder}\n")
+    return None
+
+
+def cmd_open(args):
+    """Open the download folder of a tracked manga (issue #357)."""
+    folder, code = _manga_download_folder(args.target)
+    if folder is None:
+        return code
+    problem = _open_folder(folder)
+    if problem:
+        err_console.print(f"[red]Could not open the folder:[/red] {_esc(problem)}")
+        err_console.print(f"[dim]Folder: {_esc(folder)}[/dim]", soft_wrap=True)
+        return EXIT_ERROR
+    console.print(f"[green]📂 Opened:[/green] {_esc(folder)}", soft_wrap=True)
+    return None
 
 
 _HOST_LABEL = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
@@ -3083,6 +3215,8 @@ Examples:
   memanga check --dry-run               # Only list new chapters
   memanga edit "#1" --status on-hold    # Change a manga's status
   memanga read "Solo Leveling" 1 2      # Mark chapters read (unread undoes)
+  memanga path "Solo Leveling"          # Print its download folder
+  memanga open "Solo Leveling"          # Open its download folder
   memanga doctor                        # Diagnose setup problems
   memanga cron install                  # Set up daily checks
   memanga config                        # Configure settings
@@ -3239,6 +3373,30 @@ Examples:
                             help="Chapter number or label, e.g. 12 or 10.5")
         p_mark.add_argument("--all", action="store_true", help=all_help)
         p_mark.set_defaults(func=cmd_read, mark_read=mark_read)
+
+    # path / open (issue #357): the manga's download folder.
+    for name, func, help_text, detail in (
+        ("path", cmd_path, "Print the download folder of a manga",
+         "Only the absolute path is printed to stdout, so scripts can use\n"
+         "it: cd \"$(memanga path TARGET)\"."),
+        ("open", cmd_open, "Open the download folder of a manga in the file manager",
+         "Uses the system file manager (xdg-open on Linux)."),
+    ):
+        p_folder = subparsers.add_parser(
+            name, help=help_text,
+            description=(
+                f"{help_text}: <download dir>/<title>, where its chapters are saved.\n"
+                f"{detail}\n"
+                "Nothing is created; a manga with nothing downloaded yet is an error.\n\n"
+                "Exit codes: 0 success; 1 the manga was not found or is ambiguous,\n"
+                "it has no download folder yet, or the folder could not be opened;\n"
+                "2 usage error."
+            ),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        p_folder.add_argument("target", metavar="TARGET",
+                              help="Manga title, or #N for its number in 'memanga list'")
+        p_folder.set_defaults(func=func)
 
     # check
     p_check = subparsers.add_parser(
