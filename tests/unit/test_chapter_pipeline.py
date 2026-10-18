@@ -527,3 +527,28 @@ class TestDeleteFailure:
             ("email_sent",), ("delete_failed", "in use"),
         ]
         assert state.is_chapter_downloaded(TITLE, "71")
+
+
+class TestDownloadHistory:
+    def test_complete_save_records_download_history(self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        pipeline.process(SINGLE, _primary())
+
+        history = state.get_download_history()
+        assert len(history) == 1
+        entry = history[0]
+        assert (entry["title"], entry["chapter"], entry["format"]) == (
+            TITLE, "71", "pdf")
+        assert entry["path"] == str(pdf)
+
+    def test_partial_save_does_not_record_download_history(
+            self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", True): ("partial", pdf, [7], 40)})
+        pipeline = _pipeline(state, tmp_path, downloads, allow_partial=True)
+
+        outcome = pipeline.process(SINGLE, _primary())
+
+        assert outcome.status is ChapterStatus.PARTIAL
+        assert state.get_download_history() == []

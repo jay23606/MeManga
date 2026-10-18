@@ -268,7 +268,6 @@ class MeMangaApp(QMainWindow):
     def _on_download_complete(self, data):
         title = data.get("title", "")
         chapter = data.get("chapter", "")
-        path = data.get("path", "")
 
         # The worker's chapter pipeline has already recorded the chapter
         # (downloaded, partial or failed records, and the partial
@@ -276,18 +275,6 @@ class MeMangaApp(QMainWindow):
         if not data.get("partial"):
             self.app_state.add_notification("download", f"Downloaded {title} Ch. {chapter}")
         self.events.publish("notification_added", {})
-
-        size_mb = 0
-        if path:
-            try:
-                from pathlib import Path
-                size_mb = Path(path).stat().st_size / (1024 * 1024)
-            except Exception:
-                pass
-        self.app_state.add_download_history(
-            title=title, chapter=str(chapter),
-            fmt=self.config.output_format, path=path, size_mb=size_mb,
-        )
 
         self._settle_new_chapter_download(
             title, data.get("task_id"), failed=False

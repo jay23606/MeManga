@@ -342,7 +342,21 @@ class ChapterPipeline:
         self.state.add_downloaded_chapter(title, chapter.number)
         self.state.clear_pending_backup(title, chapter.number)
         self.state.clear_failed_chapter(title, chapter.number)
+        if outcome.status is ChapterStatus.COMPLETE:
+            self._record_download(title, chapter.number, path)
         return outcome
+
+    def _record_download(self, title: str, number: str, path: Path) -> None:
+        """Log a complete save in download history (the suspicious-batch
+        guard reads it). Partial saves are not logged."""
+        try:
+            size_mb = path.stat().st_size / (1024 * 1024)
+        except OSError:
+            size_mb = 0
+        self.state.add_download_history(
+            title=title, chapter=str(number),
+            fmt=self.options.output_format, path=str(path), size_mb=size_mb,
+        )
 
     def _deliver(self, manga: Dict[str, Any], path: Path) -> DeliveryStatus:
         """Send to Kindle when email delivery is configured and the manga
