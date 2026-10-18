@@ -100,6 +100,13 @@ All notable changes are recorded here. Format loosely follows
   manga. `check` and `failed retry` now process chapters through one
   shared module, so their download, backup, partial, delivery and state
   handling stay the same.
+- #295 GUI downloads now go through the same chapter steps as
+  `check --download` and `failed retry`. The Detail and Downloads pages
+  honor "Delete after sending to Kindle", image folders are no longer
+  emailed, the backup source is searched with the same group filters as
+  the command line, and a backup-delay clock is cleared once the chapter
+  is saved. Chapters the reader fetches ahead of time are never deleted
+  after sending.
 - #351 `memanga check --quiet` on a terminal without `--download` now
   skips new chapters and exits 1 with a hint, as it already did without a
   terminal. It used to skip them silently and exit 0. `--quiet` never

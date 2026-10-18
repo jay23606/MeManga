@@ -45,6 +45,9 @@ class _Recorder(ChapterReporter):
     def downloading(self, chapter):
         self.events.append(("downloading", chapter.source))
 
+    def progress(self, current, total):
+        self.events.append(("progress", current, total))
+
     def trying_backup(self, error, backup_chapter):
         self.events.append(("trying_backup", str(error), backup_chapter.source))
 
@@ -65,6 +68,9 @@ class _Recorder(ChapterReporter):
 
     def deleted_after_send(self, path):
         self.events.append(("deleted_after_send",))
+
+    def delete_failed(self, path, error):
+        self.events.append(("delete_failed", str(error)))
 
     def email_failed(self, error):
         self.events.append(("email_failed", str(error)))
@@ -278,6 +284,7 @@ class TestFailure:
         record = state.get_failed_chapters(TITLE)["71"]
         assert record["source"] == "primary.test+backup.test"
         assert record["error"] == "Primary: primary broke; Backup: backup broke"
+        assert outcome.message == record["error"]
         assert record["failed_pages"] == [4]
         assert not state.is_chapter_downloaded(TITLE, "71")
         assert pipeline.reporter.events[-2:] == [
@@ -295,6 +302,19 @@ class TestFailure:
         assert outcome.backup_error is None
         record = state.get_failed_chapters(TITLE)["71"]
         assert (record["source"], record["error"]) == ("primary.test", "HTTP 503")
+        assert outcome.message == "HTTP 503"
+
+    def test_plain_chapter_is_recorded_under_the_manga_source(
+            self, state, tmp_path):
+        def download(*args, **kwargs):
+            raise DownloaderError("HTTP 503")
+
+        pipeline = _pipeline(state, tmp_path, download)
+        pipeline.reporter = ChapterReporter()  # the recorder reads .source
+
+        pipeline.process(SINGLE, Chapter(number="71", url="https://primary.test/c/71"))
+
+        assert state.get_failed_chapters(TITLE)["71"]["source"] == "primary.test"
 
     def test_other_errors_propagate_without_records(self, state, tmp_path):
         downloads = _Downloads({("primary.test", False): RuntimeError("bug")})
@@ -336,6 +356,56 @@ class TestDelivery:
         assert pipeline.reporter.events[-1] == ("email_failed", "SMTP down")
         assert state.is_chapter_downloaded(TITLE, "71")
 
+    def test_attachment_preparation_error_is_a_failed_delivery(
+            self, state, tmp_path, pdf):
+        # Splitting a large PDF needs a temp folder; an OSError there is
+        # not an EmailError but must not fail the saved chapter.
+        state.add_failed_chapter(TITLE, "71", "primary.test", "timeout")
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads,
+                             sent=OSError("No space left on device"),
+                             delivery_mode="email", email=EMAIL,
+                             delete_after_send=True)
+
+        outcome = pipeline.process(SINGLE, _primary())
+
+        assert outcome.status is ChapterStatus.COMPLETE
+        assert outcome.saved
+        assert outcome.delivery is DeliveryStatus.FAILED
+        assert pdf.exists()
+        assert pipeline.reporter.events[-2:] == [
+            ("email_sending",), ("email_failed", "No space left on device"),
+        ]
+        assert state.is_chapter_downloaded(TITLE, "71")
+        assert state.get_failed_chapters(TITLE) == {}
+
+    def test_app_password_error_is_a_failed_delivery(
+            self, state, tmp_path, pdf):
+        def no_keyring():
+            raise RuntimeError("keyring locked")
+
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads, sent=[],
+                             delivery_mode="email", email=EMAIL)
+        pipeline.app_password = no_keyring
+
+        outcome = pipeline.process(SINGLE, _primary())
+
+        assert outcome.delivery is DeliveryStatus.FAILED
+        assert pipeline.reporter.events[-1] == ("email_failed", "keyring locked")
+        assert state.is_chapter_downloaded(TITLE, "71")
+
+    def test_cancel_during_send_still_propagates(self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads,
+                             sent=InterruptedError("Download cancelled"),
+                             delivery_mode="email", email=EMAIL)
+
+        with pytest.raises(InterruptedError):
+            pipeline.process(SINGLE, _primary())
+        assert pdf.exists()
+        assert not state.is_chapter_downloaded(TITLE, "71")
+
     def test_image_folder_is_not_emailed(self, state, tmp_path):
         folder = tmp_path / "Chapter 71"
         folder.mkdir()
@@ -357,3 +427,70 @@ class TestDelivery:
 
         assert pipeline.process(SINGLE, _primary()).delivery is DeliveryStatus.NOT_REQUESTED
         assert sent == []
+
+
+class TestProgressAndCancellation:
+    """Inputs only the GUI uses (issue #295): page progress, a cancel
+    event and the file naming template reach every download attempt."""
+
+    def test_reach_primary_and_backup_attempts(self, state, tmp_path, pdf):
+        import threading
+
+        calls = []
+
+        def download(manga, chapter, output_dir, output_format, **kwargs):
+            calls.append(kwargs)
+            if not chapter.is_backup:
+                raise DownloaderError("primary broke")
+            kwargs["progress_callback"](3, 3)
+            return pdf
+
+        cancel = threading.Event()
+        pipeline = _pipeline(state, tmp_path, download, backup=_backup(),
+                             naming_template="{title} {chapter}")
+        pipeline.cancel_event = cancel
+
+        outcome = pipeline.process(WITH_BACKUP, _primary())
+
+        assert outcome.from_backup
+        assert [k["cancel_event"] for k in calls] == [cancel, cancel]
+        assert [k["naming_template"] for k in calls] == ["{title} {chapter}"] * 2
+        assert ("progress", 3, 3) in pipeline.reporter.events
+
+    def test_cancel_during_backup_propagates_without_records(
+            self, state, tmp_path):
+        downloads = _Downloads({
+            ("primary.test", False): DownloaderError("primary broke"),
+            ("backup.test", False): InterruptedError("Download cancelled"),
+        })
+        pipeline = _pipeline(state, tmp_path, downloads, backup=_backup(),
+                             allow_partial=True, partial_threshold=10)
+
+        with pytest.raises(InterruptedError):
+            pipeline.process(WITH_BACKUP, _primary())
+        # Cancelling is not a failure: no record, and no partial salvage.
+        assert downloads.calls == [("primary.test", False), ("backup.test", None)]
+        assert state.get_failed_chapters(TITLE) == {}
+        assert not state.is_chapter_downloaded(TITLE, "71")
+
+
+class TestDeleteFailure:
+    def test_failed_delete_keeps_file_and_counts_as_sent(
+            self, state, tmp_path, pdf, monkeypatch):
+        def refuse(self, *args, **kwargs):
+            raise PermissionError("in use")
+
+        monkeypatch.setattr(type(pdf), "unlink", refuse)
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads, sent=[],
+                             delivery_mode="email", email=EMAIL,
+                             delete_after_send=True)
+
+        outcome = pipeline.process(SINGLE, _primary())
+
+        assert outcome.delivery is DeliveryStatus.SENT
+        assert pdf.exists()
+        assert pipeline.reporter.events[-2:] == [
+            ("email_sent",), ("delete_failed", "in use"),
+        ]
+        assert state.is_chapter_downloaded(TITLE, "71")

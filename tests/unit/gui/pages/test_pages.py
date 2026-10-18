@@ -32,17 +32,30 @@ def test_pages_handle_theme_switch(app_window, qapp, theme):
         theme.set_theme("dark", qapp); qapp.processEvents()
 
 
-def test_download_complete_clears_failed_chapter(app_window, qapp):
+def test_download_complete_logs_history_and_leaves_records_to_pipeline(
+        app_window, qapp):
+    # Issue #295: the worker's chapter pipeline writes the chapter
+    # records before it publishes download_complete; the handler only
+    # logs the download and must not write a second set of records.
     app_window.app_state.add_failed_chapter("M", "1", "mock.test", "boom")
-    assert "1" in app_window.app_state.get_failed_chapters("M")
+    history_before = len(app_window.app_state.get("download_history", []))
 
     app_window._on_download_complete({"title": "M", "chapter": "1", "path": ""})
     qapp.processEvents()
 
-    assert "1" not in app_window.app_state.get_failed_chapters("M")
+    history = app_window.app_state.get("download_history", [])
+    assert len(history) == history_before + 1
+    assert (history[-1]["title"], history[-1]["chapter"]) == ("M", "1")
+    assert any(n["message"] == "Downloaded M Ch. 1"
+               for n in app_window.app_state.get("notifications", []))
+    assert "1" in app_window.app_state.get_failed_chapters("M")
+    assert not app_window.app_state.is_chapter_downloaded("M", "1")
 
 
-def test_download_complete_records_and_clears_partial_chapter(app_window, qapp):
+def test_download_complete_partial_adds_no_second_warning(app_window, qapp):
+    # The pipeline already added the partial warning.
+    notes_before = len(app_window.app_state.get("notifications", []))
+
     app_window._on_download_complete({
         "title": "M",
         "chapter": "1",
@@ -53,15 +66,7 @@ def test_download_complete_records_and_clears_partial_chapter(app_window, qapp):
     })
     qapp.processEvents()
 
-    partial = app_window.app_state.get_partial_chapter("M", "1")
-    assert partial["failed_pages"] == [4, 8]
-    assert partial["total_pages"] == 40
-    assert partial["source"] == "mangadex.org"
-    assert partial["from_backup"] is True
-
-    app_window._on_download_complete({"title": "M", "chapter": "1", "path": ""})
-    qapp.processEvents()
-
+    assert len(app_window.app_state.get("notifications", [])) == notes_before
     assert app_window.app_state.get_partial_chapter("M", "1") is None
 
 
