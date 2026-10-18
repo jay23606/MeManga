@@ -428,6 +428,39 @@ class TestDelivery:
         assert pipeline.process(SINGLE, _primary()).delivery is DeliveryStatus.NOT_REQUESTED
         assert sent == []
 
+    def test_manga_send_to_kindle_false_skips_email_but_saves(
+            self, state, tmp_path, pdf):
+        """A per-manga opt-out (set in the desktop app, issue #341) stops
+        delivery even when global email delivery is on; the chapter is
+        still saved and marked downloaded."""
+        sent = []
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads, sent=sent,
+                             delivery_mode="email", email=EMAIL,
+                             delete_after_send=True)
+        manga = dict(SINGLE, send_to_kindle=False)
+
+        outcome = pipeline.process(manga, _primary())
+
+        assert outcome.status is ChapterStatus.COMPLETE
+        assert outcome.delivery is DeliveryStatus.NOT_REQUESTED
+        assert sent == []
+        assert pdf.exists()
+        assert ("email_sending",) not in pipeline.reporter.events
+        assert state.is_chapter_downloaded(TITLE, "71")
+
+    def test_manga_send_to_kindle_true_still_emails(self, state, tmp_path, pdf):
+        sent = []
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads, sent=sent,
+                             delivery_mode="email", email=EMAIL)
+        manga = dict(SINGLE, send_to_kindle=True)
+
+        outcome = pipeline.process(manga, _primary())
+
+        assert outcome.delivery is DeliveryStatus.SENT
+        assert sent == [pdf]
+
 
 class TestProgressAndCancellation:
     """Inputs only the GUI uses (issue #295): page progress, a cancel

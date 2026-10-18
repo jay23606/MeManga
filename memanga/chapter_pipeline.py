@@ -34,7 +34,7 @@ class ChapterStatus(Enum):
 class DeliveryStatus(Enum):
     """What Kindle delivery did with a saved chapter."""
 
-    NOT_REQUESTED = "not_requested"    # local delivery, or no Kindle address
+    NOT_REQUESTED = "not_requested"    # local delivery, no Kindle address, or manga opted out
     SKIPPED_FOLDER = "skipped_folder"  # image folders cannot be emailed
     SENT = "sent"
     FAILED = "failed"                  # the file stays on disk
@@ -338,17 +338,20 @@ class ChapterPipeline:
         self.reporter.saved(outcome)
 
         # Delivery runs before the chapter is marked downloaded (#86).
-        outcome = replace(outcome, delivery=self._deliver(path))
+        outcome = replace(outcome, delivery=self._deliver(manga, path))
         self.state.add_downloaded_chapter(title, chapter.number)
         self.state.clear_pending_backup(title, chapter.number)
         self.state.clear_failed_chapter(title, chapter.number)
         return outcome
 
-    def _deliver(self, path: Path) -> DeliveryStatus:
-        """Send to Kindle when email delivery is configured."""
+    def _deliver(self, manga: Dict[str, Any], path: Path) -> DeliveryStatus:
+        """Send to Kindle when email delivery is configured and the manga
+        has not opted out (per-manga ``send_to_kindle``, default on)."""
         opts = self.options
         email = opts.email
         if not (opts.delivery_mode == "email" and email.get("kindle_email")):
+            return DeliveryStatus.NOT_REQUESTED
+        if not manga.get("send_to_kindle", True):
             return DeliveryStatus.NOT_REQUESTED
         if path.is_dir():
             self.reporter.email_skipped_folder(path)
