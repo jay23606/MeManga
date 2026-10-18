@@ -4636,3 +4636,175 @@ class TestRemoveHistoryAndFiles:
         out = capsys.readouterr().out
         for flag in ("--purge-history", "--keep-files", "--delete-files"):
             assert flag in out
+
+
+class TestReadUnread:
+    """Issue #356: `read` / `unread TARGET [CHAPTER...] [--all]` write the
+    per-chapter read set the desktop reader and Library/Detail use."""
+
+    @pytest.fixture(autouse=True)
+    def wide_console(self, monkeypatch):
+        from rich.console import Console
+        from memanga import cli
+        monkeypatch.setattr(cli, "console", Console(width=250))
+        monkeypatch.setattr(cli, "err_console", Console(width=250, stderr=True))
+
+    @pytest.fixture
+    def library(self, config, cli_state):
+        config.set("manga", [
+            {"title": t, "source": "mangadex.org",
+             "url": f"https://mangadex.org/title/{i}/x", "status": "reading"}
+            for i, t in enumerate(("One Piece", "Berserk"))
+        ])
+        config.save()
+        for ch in ("1", "2", "3", "10.5"):
+            cli_state.add_downloaded_chapter("One Piece", ch)
+        cli_state.set_available_chapters("One Piece", [
+            {"number": n, "title": "", "source": "mangadex.org"}
+            for n in ("1", "2", "3", "4", "10.5", "Extra")
+        ])
+        cli_state.mark_external_chapter("One Piece", "0")
+        cli_state.set_reader_position("One Piece", "2", mode="single", page_index=5)
+        cli_state.save()
+
+    def _read(self, title="One Piece"):
+        return _disk_state().get_read_chapters(title)
+
+    def test_read_marks_chapters_and_resets_page(self, run_cli, library, capsys):
+        capsys.readouterr()
+        assert run_cli("read", "One Piece", "1", "2") == 0
+        out = capsys.readouterr().out
+        assert "Marked 2 chapters of One Piece read" in out
+        disk = _disk_state()
+        assert disk.get_read_chapters("One Piece") == ["1", "2"]
+        # Same as finishing a chapter in the reader.
+        assert disk.get_reader_position("One Piece", "2") is None
+        # The "continue reading" cursor and downloads are untouched.
+        assert disk.get_reading_progress("One Piece") == {
+            "last_chapter": None, "last_read": None}
+        assert disk.get_downloaded_chapters("One Piece") == ["1", "2", "3", "10.5"]
+
+    def test_read_accepts_any_listed_chapter(self, run_cli, library):
+        # Not downloaded, but in the Detail chapter list.
+        assert run_cli("read", "#1", "4", "Extra", "0") == 0
+        assert self._read() == ["4", "Extra", "0"]
+
+    def test_plain_number_resolves_to_stored_label(self, run_cli, library):
+        assert run_cli("read", "One Piece", "01", "10.50") == 0
+        assert self._read() == ["1", "10.5"]
+
+    def test_unknown_chapter_changes_nothing(self, run_cli, library, capsys):
+        capsys.readouterr()
+        assert run_cli("read", "One Piece", "1", "99") == 1
+        captured = capsys.readouterr()
+        assert "Unknown chapter" in captured.err and "99" in captured.err
+        assert captured.out == ""
+        assert self._read() == []
+        assert _disk_state().get_reader_position("One Piece", "2") is not None
+
+    def test_ambiguous_number_changes_nothing(self, run_cli, config, cli_state,
+                                              capsys):
+        config.set("manga", [{"title": "Dup", "source": "mangadex.org",
+                              "url": "https://mangadex.org/title/d/x"}])
+        config.save()
+        cli_state.add_downloaded_chapter("Dup", "5.0")
+        cli_state.add_downloaded_chapter("Dup", "5.00")
+        cli_state.save()
+        capsys.readouterr()
+        assert run_cli("read", "Dup", "5") == 1
+        assert "Ambiguous chapter" in capsys.readouterr().err
+        assert self._read("Dup") == []
+        # The exact label still works.
+        assert run_cli("read", "Dup", "5.0") == 0
+        assert self._read("Dup") == ["5.0"]
+
+    def test_read_all_marks_downloaded_only(self, run_cli, library):
+        assert run_cli("read", "One Piece", "--all") == 0
+        assert self._read() == ["1", "2", "3", "10.5"]
+
+    def test_read_all_without_downloads(self, run_cli, library, capsys):
+        capsys.readouterr()
+        assert run_cli("read", "Berserk", "--all") == 0
+        assert "No downloaded chapters" in capsys.readouterr().out
+        assert self._read("Berserk") == []
+
+    def test_repeat_is_a_noop(self, run_cli, library, capsys):
+        assert run_cli("read", "One Piece", "1") == 0
+        capsys.readouterr()
+        assert run_cli("read", "One Piece", "1", "2") == 0
+        out = capsys.readouterr().out
+        assert "Marked 1 chapter of One Piece read: 2" in out
+        assert "Already read: 1" in out
+        assert self._read() == ["1", "2"]
+
+    @pytest.mark.parametrize("argv", [("2",), ("--all",)])
+    def test_read_keeps_page_of_already_read_chapter(self, run_cli, library,
+                                                    cli_state, argv):
+        # Chapter 2 was finished, then reopened and left at page 5.
+        cli_state.mark_chapter_read("One Piece", "2")
+        cli_state.save()
+        assert run_cli("read", "One Piece", *argv) == 0
+        disk = _disk_state()
+        assert disk.get_reader_position("One Piece", "2")["page_index"] == 5
+        assert "2" in disk.get_read_chapters("One Piece")
+
+    def test_unread_chapters(self, run_cli, library, cli_state, capsys):
+        cli_state.mark_chapter_read("One Piece", "1")
+        cli_state.mark_chapter_read("One Piece", "3")
+        cli_state.save()
+        capsys.readouterr()
+        assert run_cli("unread", "One Piece", "1", "2") == 0
+        out = capsys.readouterr().out
+        assert "Marked 1 chapter of One Piece unread: 1" in out
+        assert "Already unread: 2" in out
+        disk = _disk_state()
+        assert disk.get_read_chapters("One Piece") == ["3"]
+        # Unread keeps an in-chapter resume point.
+        assert disk.get_reader_position("One Piece", "2") is not None
+
+    def test_unread_reaches_read_chapter_no_longer_listed(
+            self, run_cli, library, cli_state):
+        # e.g. read in the app, then its file removed after reading.
+        cli_state.mark_chapter_read("One Piece", "7")
+        cli_state.save()
+        assert run_cli("unread", "One Piece", "7") == 0
+        assert self._read() == []
+
+    def test_unread_all_clears_read_set(self, run_cli, library, cli_state):
+        for ch in ("1", "7", "Extra"):
+            cli_state.mark_chapter_read("One Piece", ch)
+        cli_state.save()
+        assert run_cli("unread", "One Piece", "--all") == 0
+        assert self._read() == []
+
+    def test_state_matches_gui_reader_helpers(self, run_cli, library):
+        assert run_cli("read", "One Piece", "3") == 0
+        disk = _disk_state()
+        assert disk.is_chapter_read("One Piece", "3")
+        assert disk.get_read_count("One Piece") == 1
+
+    @pytest.mark.parametrize("argv", [
+        ("read", "One Piece"),
+        ("unread", "One Piece"),
+        ("read", "One Piece", "1", "--all"),
+    ])
+    def test_usage_errors(self, run_cli, library, capsys, argv):
+        capsys.readouterr()
+        assert run_cli(*argv) == 2
+        err = capsys.readouterr().err
+        assert "CHAPTER" in err and "--all" in err
+        assert self._read() == []
+
+    @pytest.mark.parametrize("command", ["read", "unread"])
+    def test_target_errors(self, run_cli, library, capsys, command):
+        capsys.readouterr()
+        assert run_cli(command, "Naruto", "1") == 1
+        assert "Not found" in capsys.readouterr().err
+        assert run_cli(command, "e", "1") == 1  # One Piece and Berserk
+        assert "Ambiguous" in capsys.readouterr().err
+
+    def test_listed_in_help(self, run_cli, capsys):
+        assert run_cli("--help") == 0
+        out = capsys.readouterr().out
+        assert "read,unread" in out
+        assert "Mark chapters of a manga as read" in out

@@ -7,6 +7,12 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #356 `memanga read TARGET CHAPTER...` and `memanga unread TARGET
+  CHAPTER...` mark chapters read or unread in the same read state the
+  desktop reader, Library and chapter list use. `read --all` marks every
+  downloaded chapter; `unread --all` clears the manga's read chapters.
+  Every chapter is checked before anything changes, and files and download
+  history are never touched.
 - #248 `memanga --version` (also `-V`) prints the installed version, and
   `memanga completion bash` prints a bash completion script.
   Help and error messages always name the program `memanga`, also under

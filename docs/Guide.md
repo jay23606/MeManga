@@ -25,6 +25,7 @@ them to your Kindle.
 - [Downloading From the Start](#downloading-from-the-start)
 - [Downloading From a Specific Chapter](#downloading-from-a-specific-chapter)
 - [Managing Status](#managing-status)
+- [Marking Chapters Read](#marking-chapters-read)
 - [Changing Output Format](#changing-output-format)
 - [MangaDex Image Quality and Group Removal](#mangadex-image-quality-and-group-removal)
 - [Post-Processing After Download](#post-processing-after-download)
@@ -659,6 +660,33 @@ release.
 
 ---
 
+## Marking Chapters Read
+
+The desktop reader marks a chapter read when you reach its end. `read` and
+`unread` change the same read state from the command line, so the Library
+("X/N read") and the chapter list show it too.
+
+```bash
+run read "One Piece" 1 2 3      # mark chapters read
+run read "One Piece" --all      # mark every downloaded chapter read
+run unread "One Piece" 3        # mark a chapter unread again
+run unread "One Piece" --all    # mark the whole manga unread
+```
+
+The manga is a title or `#N` from `run list`, matched like `edit`. Each
+chapter must be in the manga's chapter list in the desktop app: downloaded,
+found by `check`, or marked read elsewhere. `5`, `05` and `5.0` all name the
+chapter stored as `5`; labels such as `Extra` must be typed as shown. If any
+chapter is not found, nothing is changed and the command exits `1`. Chapters
+that are already read (or unread) are reported and left as they are.
+
+Marking a chapter read also resets its saved page, as finishing it in the
+reader does. Downloaded files, download history and "Continue Reading" are
+never changed. Close the desktop app before using these commands: while it
+is open it keeps its own copy of the read state and can overwrite the change.
+
+---
+
 ## Changing Output Format
 
 MeManga supports seven formats:
@@ -1175,6 +1203,10 @@ run import - --replace --yes < memanga_export.json
 | `run edit "Title" --status on-hold` | Set status to on-hold |
 | `run edit "Title" --status dropped` | Set status to dropped |
 | `run edit "Title" --status completed` | Set status to completed |
+| `run read "Title" 1 2` | Mark chapters read |
+| `run read "Title" --all` | Mark every downloaded chapter read |
+| `run unread "Title" 2` | Mark a chapter unread |
+| `run unread "Title" --all` | Mark every chapter unread |
 | `run remove "Title"` | Remove a manga |
 | `run update "Title" -u URL` | Change primary source URL |
 | `run update "Title" -b URL` | Change backup source URL |

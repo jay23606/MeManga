@@ -163,6 +163,12 @@ class TestBashCompletion:
         assert _complete(script, "se") == ["search"]
         assert _complete(script, "update", "Some Title", "--st") == ["--status"]
 
+    def test_read_unread(self, script):
+        reply = _complete(script, "")
+        assert {"read", "unread"} <= set(reply)
+        assert _complete(script, "read", "Some Title", "--a") == ["--all"]
+        assert _complete(script, "unread", "Some Title", "--a") == ["--all"]
+
     def test_nested_actions_and_their_options(self, script):
         assert "retry" in _complete(script, "failed", "")
         assert "--json" in _complete(script, "config", "show", "--")

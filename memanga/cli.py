@@ -39,7 +39,7 @@ from .cron import (build_cron_line, build_task_command, managed_lines,
                    remove_managed_lines, replace_managed_line,
                    source_checkout_root, unmanaged_memanga_lines)
 from . import __version__, completion, doctor
-from .state import State, _chapter_number
+from .state import State, _chapter_number, _chapter_sort_key
 from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, DEFAULT_PAGE_RETRIES, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
 from .scrapers import get_scraper
 from .search import compute_search_sources, probe_chapter_counts, sweep
@@ -726,6 +726,133 @@ def cmd_set_status(args):
         f"[cyan]{_esc(found['title'])}[/cyan]: "
         f"[{old_color}]{_esc(old_status)}[/] → [{new_color}]{_esc(new_status)}[/]"
     )
+
+
+_PLAIN_CHAPTER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
+def _chapter_lookup(tokens, known):
+    """Resolve CHAPTER arguments to the labels stored for a manga (#356).
+
+    The GUI matches read chapters by their exact label, so each argument
+    must name a stored label: an exact match wins, then a plain number
+    ("5", "05", "5.0") matches the one plain-number label of equal value.
+    Labels such as "Chapter 5" or "5 Part 1" only match exactly.
+
+    Returns (resolved, unknown, ambiguous): resolved labels in argument
+    order without duplicates, arguments matching nothing, and arguments
+    matching several labels (mapped to those labels).
+    """
+    known = list(dict.fromkeys(str(k) for k in known))
+    plain = [k for k in known if _PLAIN_CHAPTER.fullmatch(k)]
+    resolved, unknown, ambiguous = [], [], {}
+    for token in tokens:
+        token = token.strip()
+        if token in known:
+            matches = [token]
+        elif _PLAIN_CHAPTER.fullmatch(token):
+            matches = [k for k in plain if float(k) == float(token)]
+        else:
+            matches = []
+        if not matches:
+            unknown.append(token)
+        elif len(matches) > 1:
+            ambiguous[token] = matches
+        elif matches[0] not in resolved:
+            resolved.append(matches[0])
+    return resolved, unknown, ambiguous
+
+
+def _chapter_list_text(chapters) -> str:
+    return ", ".join(_esc(ch) for ch in chapters)
+
+
+def cmd_read(args):
+    """Mark chapters of a tracked manga read or unread (issue #356).
+
+    Writes the same per-chapter read set the desktop reader and the
+    Library/Detail pages use. Marking read also clears the chapter's
+    saved in-chapter position, as finishing it in the reader does;
+    unread only drops it from the read set. Files, download history
+    and the "continue reading" chapter are never changed.
+
+    Every CHAPTER is checked before anything is written, so one bad
+    argument leaves the state untouched.
+    """
+    mark_read = args.mark_read
+    manga_list = config.get("manga", [])
+
+    if not manga_list:
+        return _error("[yellow]No manga tracked.[/yellow]")
+
+    found, _, candidates = _find_manga(args.target, manga_list)
+
+    if not found:
+        return _target_error(args.target, candidates)
+
+    title = found["title"]
+    read_set = state.get_read_chapters(title)
+    downloaded = state.get_downloaded_chapters(title)
+
+    if args.all:
+        if mark_read:
+            chapters = sorted(dict.fromkeys(str(ch) for ch in downloaded),
+                              key=_chapter_sort_key)
+            if not chapters:
+                console.print(f"[dim]No downloaded chapters of {_esc(title)} to mark read.[/dim]")
+                return None
+        else:
+            chapters = sorted(read_set, key=_chapter_sort_key)
+            if not chapters:
+                console.print(f"[dim]No chapters of {_esc(title)} are marked read.[/dim]")
+                return None
+    else:
+        # The chapters the desktop app lists for this manga (its Detail
+        # page), plus, for unread, anything already in the read set.
+        known = [entry.get("number", "") for entry in state.get_available_chapters(title)]
+        known += downloaded + state.get_external_chapters(title)
+        if not mark_read:
+            known += read_set
+        known = [str(k) for k in known if str(k)]
+        chapters, unknown, ambiguous = _chapter_lookup(args.chapters, known)
+        if unknown or ambiguous:
+            for token in unknown:
+                err_console.print(
+                    f"[red]Unknown chapter:[/red] {_esc(token)} is not in the "
+                    f"chapter list of {_esc(title)}"
+                )
+            for token, matches in ambiguous.items():
+                err_console.print(
+                    f"[red]Ambiguous chapter:[/red] {_esc(token)} matches "
+                    f"{_chapter_list_text(matches)}; give the exact label"
+                )
+            err_console.print("[dim]Nothing was changed.[/dim]")
+            return EXIT_ERROR
+
+    if mark_read:
+        changed = [ch for ch in chapters if ch not in read_set]
+        # Only chapters becoming read: an already-read chapter may have
+        # been reopened, and its new saved page must survive.
+        for ch in changed:
+            state.mark_chapter_read(title, ch)
+            # A finished chapter reopens at its start, as in the reader.
+            state.clear_reader_position(title, ch)
+    else:
+        changed = [ch for ch in chapters if ch in read_set]
+        for ch in changed:
+            state.unmark_chapter_read(title, ch)
+    state.flush()
+
+    verb = "read" if mark_read else "unread"
+    unchanged = [ch for ch in chapters if ch not in changed]
+    if changed:
+        noun = "chapter" if len(changed) == 1 else "chapters"
+        console.print(
+            f"[green]✅ Marked {len(changed)} {noun} of {_esc(title)} {verb}:[/green] "
+            f"{_chapter_list_text(changed)}"
+        )
+    if unchanged:
+        console.print(f"[dim]Already {verb}: {_chapter_list_text(unchanged)}[/dim]")
 
 
 _HOST_LABEL = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
@@ -2955,6 +3082,7 @@ Examples:
   memanga check --download              # Download new chapters, no prompts
   memanga check --dry-run               # Only list new chapters
   memanga edit "#1" --status on-hold    # Change a manga's status
+  memanga read "Solo Leveling" 1 2      # Mark chapters read (unread undoes)
   memanga doctor                        # Diagnose setup problems
   memanga cron install                  # Set up daily checks
   memanga config                        # Configure settings
@@ -3083,6 +3211,34 @@ Examples:
     p_set.add_argument("target", help="Manga title, or #N for its number in 'memanga list'")
     p_set.add_argument("status", choices=VALID_STATUSES, help="New status")
     p_set.set_defaults(func=cmd_set_status)
+
+    # read / unread (issue #356): the read state the desktop reader keeps.
+    for name, mark_read, help_text, all_help in (
+        ("read", True, "Mark chapters of a manga as read",
+         "Mark every downloaded chapter read"),
+        ("unread", False, "Mark chapters of a manga as unread",
+         "Mark every read chapter unread"),
+    ):
+        p_mark = subparsers.add_parser(
+            name, help=help_text,
+            description=(
+                f"{help_text}, as the desktop app's reader and chapter list show it.\n\n"
+                "CHAPTER is a chapter number or label from the manga's chapter list\n"
+                "(downloaded, found by 'check', or marked read elsewhere); give one\n"
+                "or more, or --all. Every CHAPTER is checked before anything changes.\n"
+                "Marking read also resets the chapter's saved page, as finishing it\n"
+                "in the reader does. Files and download history are never touched.\n\n"
+                "Exit codes: 0 success (also when nothing needed changing); 1 the\n"
+                "manga or a chapter was not found or is ambiguous; 2 usage error."
+            ),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        p_mark.add_argument("target", metavar="TARGET",
+                            help="Manga title, or #N for its number in 'memanga list'")
+        p_mark.add_argument("chapters", nargs="*", metavar="CHAPTER",
+                            help="Chapter number or label, e.g. 12 or 10.5")
+        p_mark.add_argument("--all", action="store_true", help=all_help)
+        p_mark.set_defaults(func=cmd_read, mark_read=mark_read)
 
     # check
     p_check = subparsers.add_parser(
@@ -3336,6 +3492,12 @@ def _main():
         target = getattr(args, "target", None)
         if target and args.title and target != args.title:
             p_failed.error("give the target once: TARGET or -t/--title")
+
+    if args.command in ("read", "unread"):
+        if args.all and args.chapters:
+            _subparser(parser, args.command).error("give CHAPTER arguments or --all, not both")
+        if not args.all and not args.chapters:
+            _subparser(parser, args.command).error("give at least one CHAPTER, or --all")
 
     if args.command == "config" and args.config_action:
         legacy = [flag for flag, value in (
