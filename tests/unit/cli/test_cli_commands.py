@@ -3119,6 +3119,8 @@ class TestFailedSubcommands:
         assert "1/2 chapters recovered" in captured.out
         assert "Failed: chapter 10 broke" in captured.err
         assert _disk_state().get_failed_chapters("Vinland Saga")["10"]["attempts"] == 2
+        # The record keeps the primary source name, as before #222.
+        assert _disk_state().get_failed_chapters("Vinland Saga")["10"]["source"] == "mangadex.org"
         assert _disk_state().get_partial_chapter("Vinland Saga", "9") is None
 
     def test_retry_uses_check_pipeline_for_backup_and_email(
@@ -3202,6 +3204,131 @@ class TestFailedSubcommands:
         assert run_cli("failed", "retry") == 3
         assert "0/1 chapters recovered" in capsys.readouterr().out
         assert _disk_state().get_partial_chapter("Berserk", "5")["failed_pages"] == [3]
+
+    def test_retry_lists_primary_source_once_per_manga(
+            self, run_cli, records, downloads, cli_state, monkeypatch, capsys):
+        """Issue #222: several failed chapters of one manga share one
+        primary chapter listing."""
+        from memanga import cli
+        from memanga.scrapers.base import Chapter
+
+        calls, _ = downloads
+        cli_state.add_failed_chapter("Berserk", "9", "mangadex.org", "timeout")
+        cli_state.add_failed_chapter("Berserk", "10", "mangadex.org", "timeout")
+        cli_state.save()
+        listings = []
+
+        class CountingScraper:
+            def get_chapters(self, url):
+                listings.append(url)
+                return [Chapter(number=n) for n in ("1", "9", "10")]
+
+        monkeypatch.setattr(cli, "get_scraper", lambda source: CountingScraper())
+        capsys.readouterr()
+
+        assert run_cli("failed", "retry") == 0
+        assert "5/5 chapters recovered" in capsys.readouterr().out
+        assert sorted(listings) == ["https://mangadex.org/title/0/x",
+                                    "https://mangadex.org/title/1/x"]
+        assert len(calls) == 5
+        assert _disk_state().get_failed_chapters("Berserk") == {}
+
+    def test_retry_primary_listing_failure_uses_backup(
+            self, run_cli, config, cli_state, monkeypatch, tmp_path, capsys):
+        """A primary listing that fails is tried once for the manga; each
+        chapter is then looked up on the backup source."""
+        from memanga import cli
+
+        config.set("manga", [{
+            "title": "Vinland Saga",
+            "sources": [
+                {"source": "primary.test", "url": "https://primary.test/vs"},
+                {"source": "backup.test", "url": "https://backup.test/vs"},
+            ],
+        }])
+        config.save()
+        for n in ("71", "72"):
+            cli_state.add_failed_chapter("Vinland Saga", n, "primary.test", "timeout")
+        cli_state.save()
+        listings, downloaded = [], []
+
+        class BrokenScraper:
+            def get_chapters(self, url):
+                listings.append(url)
+                raise RuntimeError("listing down")
+
+        def _backup(manga, number, state=None):
+            return types.SimpleNamespace(
+                number=number, title="", url=f"https://backup.test/c/{number}",
+                source="backup.test", is_backup=True)
+
+        def _download(manga, ch, *a, **k):
+            downloaded.append((ch.source, ch.number))
+            path = tmp_path / f"{ch.number}.pdf"
+            path.write_bytes(b"pdf")
+            return path
+
+        monkeypatch.setattr(cli, "get_scraper", lambda source: BrokenScraper())
+        monkeypatch.setattr(cli, "_find_chapter_on_backup", _backup)
+        monkeypatch.setattr(cli, "download_chapter", _download)
+        capsys.readouterr()
+
+        assert run_cli("failed", "retry") == 0
+        captured = capsys.readouterr()
+        assert listings == ["https://primary.test/vs"]
+        assert downloaded == [("backup.test", "71"), ("backup.test", "72")]
+        assert "Could not find Chapter 71 of Vinland Saga on primary source" in captured.err
+        assert "2/2 chapters recovered" in captured.out
+        assert _disk_state().get_failed_chapters("Vinland Saga") == {}
+
+    def test_retry_dict_chapter_listing_falls_back_to_backup(
+            self, run_cli, config, cli_state, monkeypatch, tmp_path, capsys):
+        """Some scrapers list chapters as dicts, not Chapter objects. Retry
+        treats that listing as unusable and still reaches the backup,
+        instead of crashing on the entries."""
+        from memanga import cli
+
+        config.set("manga", [{
+            "title": "Vinland Saga",
+            "sources": [
+                {"source": "primary.test", "url": "https://primary.test/vs"},
+                {"source": "backup.test", "url": "https://backup.test/vs"},
+            ],
+        }])
+        config.save()
+        cli_state.add_failed_chapter("Vinland Saga", "71", "primary.test", "timeout")
+        cli_state.save()
+        backup_lookups, downloaded = [], []
+
+        class DictScraper:
+            def get_chapters(self, url):
+                return [{"chapter": "71", "title": "",
+                         "url": "https://primary.test/c/71"}]
+
+        def _backup(manga, number, state=None):
+            backup_lookups.append(number)
+            return types.SimpleNamespace(
+                number=number, title="", url=f"https://backup.test/c/{number}",
+                source="backup.test", is_backup=True)
+
+        def _download(manga, ch, *a, **k):
+            downloaded.append((ch.source, ch.number))
+            path = tmp_path / f"{ch.number}.pdf"
+            path.write_bytes(b"pdf")
+            return path
+
+        monkeypatch.setattr(cli, "get_scraper", lambda source: DictScraper())
+        monkeypatch.setattr(cli, "_find_chapter_on_backup", _backup)
+        monkeypatch.setattr(cli, "download_chapter", _download)
+        capsys.readouterr()
+
+        assert run_cli("failed", "retry") == 0
+        captured = capsys.readouterr()
+        assert backup_lookups == ["71"]
+        assert downloaded == [("backup.test", "71")]
+        assert "Could not find Chapter 71 of Vinland Saga on primary source" in captured.err
+        assert "1/1 chapters recovered" in captured.out
+        assert _disk_state().is_chapter_downloaded("Vinland Saga", "71")
 
     @pytest.mark.parametrize("argv", [
         ("failed", "--json", "retry"),
