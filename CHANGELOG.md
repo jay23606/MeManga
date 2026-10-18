@@ -63,6 +63,9 @@ All notable changes are recorded here. Format loosely follows
   as aliases of `retry`/`clear`.
 
 ### Changed
+- #348 `edit` is the command for changing a tracked manga, including its
+  status (`memanga edit "One Piece" --status on-hold`); `update` stays an
+  alias. Help and the bash completion list `edit (update)`.
 - #354 `import --replace` asks for confirmation before replacing the
   library and download state. Non-interactive runs and stdin imports must
   pass `--yes` (`-y`); without it they exit 1 and change nothing.
@@ -85,6 +88,13 @@ All notable changes are recorded here. Format loosely follows
   skips new chapters and exits 1 with a hint, as it already did without a
   terminal. It used to skip them silently and exit 0. `--quiet` never
   prompts and never gives permission to download.
+
+### Deprecated
+- #348 `memanga set TITLE STATUS` is deprecated in favour of
+  `memanga edit TITLE --status STATUS`. It still works in this release
+  with the same output and exit codes, prints the matching `edit` command
+  on stderr, and no longer appears in help or completion. It will be
+  removed in the next release.
 
 ### Fixed
 - #406 `scripts/run.sh` and `scripts\windows\run.bat` no longer switch to

@@ -623,34 +623,39 @@ status.
 ### Set a manga to on-hold
 
 ```bash
-run set "One Piece" on-hold
+run edit "One Piece" --status on-hold
 ```
 
 Output:
 
 ```
-One Piece: reading → on-hold
+Updated One Piece:
+  Status → on-hold
 ```
 
 ### Mark as completed
 
 ```bash
-run set "Solo Leveling" completed
+run edit "Solo Leveling" --status completed
 ```
 
 ### Resume reading
 
 ```bash
-run set "One Piece" reading
+run edit "One Piece" --status reading
 ```
 
 ### Set by list number
 
 ```bash
-run set "#1" on-hold
+run edit "#1" --status on-hold
 ```
 
-You can also use partial title matching — `run set "Solo" completed` will match "Solo Leveling" if no other title contains "Solo".
+You can also use partial title matching — `run edit "Solo" --status completed` will match "Solo Leveling" if no other title contains "Solo".
+
+`run set "Title" STATUS` still works for now but is deprecated: it prints
+the matching `edit` command on stderr and will be removed in the next
+release.
 
 ---
 
@@ -940,7 +945,7 @@ manga:
 ## Updating Manga Details
 
 Change the sources, title, or per-manga settings of a tracked manga.
-`edit` is an alias for `update`. Only the fields you pass change; everything
+`update` is an alias for `edit`. Only the fields you pass change; everything
 else is kept.
 
 ### Change the primary URL
@@ -990,7 +995,7 @@ run update "One Piece" --status on-hold --mode manual --no-kindle
 
 | Flag | Values |
 |------|--------|
-| `--status` | `reading`, `on-hold`, `dropped`, `completed` (same as `set`) |
+| `--status` | `reading`, `on-hold`, `dropped`, `completed` |
 | `--mode` | `auto`, `manual` |
 | `--kindle` / `--no-kindle` | per-manga Kindle toggle on or off |
 
@@ -1166,10 +1171,10 @@ run import - --replace --yes < memanga_export.json
 | `run check -t "Title" --from 50 --download` | Download from chapter 50 |
 | `run check --format epub` | Override output format |
 | `run check --dry-run` | Check only: list new chapters, download and save nothing |
-| `run set "Title" reading` | Set status to reading |
-| `run set "Title" on-hold` | Set status to on-hold |
-| `run set "Title" dropped` | Set status to dropped |
-| `run set "Title" completed` | Set status to completed |
+| `run edit "Title" --status reading` | Set status to reading |
+| `run edit "Title" --status on-hold` | Set status to on-hold |
+| `run edit "Title" --status dropped` | Set status to dropped |
+| `run edit "Title" --status completed` | Set status to completed |
 | `run remove "Title"` | Remove a manga |
 | `run update "Title" -u URL` | Change primary source URL |
 | `run update "Title" -b URL` | Change backup source URL |
@@ -1236,7 +1241,7 @@ filter and `--sort` order, and `count` is the number of entries shown:
 }
 ```
 
-`n` is the list number; pass it as `#N` to `set`, `update` or `remove`.
+`n` is the list number; pass it as `#N` to `edit` or `remove`.
 It stays the same when `--status` or `--sort` hide or reorder entries.
 `source` and `url` are the primary source (`null` if there is none),
 and `sources` lists the primary first, then backups. `last_chapter`
