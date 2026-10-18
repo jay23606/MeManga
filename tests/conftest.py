@@ -222,7 +222,8 @@ def patch_get_scraper(monkeypatch, mock_scraper):
     import memanga.scrapers as scrapers_pkg
     import memanga.downloader as dl
     monkeypatch.setattr(scrapers_pkg, "get_scraper", lambda d: mock_scraper)
-    monkeypatch.setattr(dl, "get_scraper", lambda d: mock_scraper)
+    monkeypatch.setattr(dl.updates, "get_scraper", lambda d: mock_scraper)
+    monkeypatch.setattr(dl.chapter, "get_scraper", lambda d: mock_scraper)
     return mock_scraper
 
 

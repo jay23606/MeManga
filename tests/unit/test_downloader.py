@@ -405,7 +405,7 @@ class TestPostProcessing:
 
         manga, chapter = self._manga_and_chapter()
         marker = tmp_path / "late.txt"
-        monkeypatch.setattr(dl, "POST_PROCESSING_TIMEOUT", 1)
+        monkeypatch.setattr(dl.post_processing, "POST_PROCESSING_TIMEOUT", 1)
 
         pp = {
             "enabled": True,
@@ -425,7 +425,7 @@ class TestPostProcessingCommandSplit:
     def test_windows_paths_keep_backslashes(self, monkeypatch):
         import memanga.downloader as dl
 
-        monkeypatch.setattr(dl.os, "name", "nt")
+        monkeypatch.setattr(dl.post_processing.os, "name", "nt")
 
         assert dl._split_post_processing_command(
             r'python C:\Tools\after_download.py {output_path}'

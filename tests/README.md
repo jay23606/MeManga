@@ -19,6 +19,7 @@ pytest --cov=memanga --cov-report=html   # HTML coverage report
 | `unit/test_state.py` | Every `State` method — chapter tracking, notifications, search history, source health, reset, JSON persistence. |
 | `unit/test_config.py` | `Config` load/save, dotted-key get/set, manga list mutations, keyring app-password helpers. |
 | `unit/test_downloader.py` | `check_for_updates`, `download_chapter`, `_sanitize_filename`, format conversion paths, fallback delay logic. |
+| `unit/test_downloader_modules.py` | `memanga.downloader` package layout — re-exported import surface, submodule dependency direction, browser cleanup registration. |
 | `unit/test_emailer.py` | SMTP send wrapping, attachment building, error paths. |
 | `unit/scrapers/` | `BaseScraper` interface conformance + per-scraper smoke tests (mocked HTTP). |
 | `unit/gui/theme/` | Token table, flat() helper, QSS builder substitution. |
