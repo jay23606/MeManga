@@ -569,6 +569,10 @@ class TestChapterNumberFormat:
         out = _format_chapter_number("12.5")
         assert "12" in out and "5" in out
 
+    def test_integer_is_zero_padded(self):
+        from memanga.downloader import _format_chapter_number
+        assert _format_chapter_number("5") == "0005.000"
+
 
 class TestGetExtension:
     def test_picks_extension_from_url(self):

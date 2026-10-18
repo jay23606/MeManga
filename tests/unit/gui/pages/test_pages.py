@@ -449,7 +449,8 @@ class TestSettingsPage:
         page = app_window._pages["settings"]
         page._naming_entry.setText("X-{chapter}")
         page._refresh_filename_preview()
-        assert "1" in page._filename_preview.text()
+        # Shows the zero-padded chapter the downloader writes (#241).
+        assert page._filename_preview.text().startswith("X-0001.000.")
 
     def test_long_template_stays_in_column(self, app_window, qapp):
         from PySide6.QtWidgets import QSizePolicy

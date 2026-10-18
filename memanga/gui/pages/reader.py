@@ -1229,11 +1229,14 @@ class ReaderPage(BasePage):
 
     def _find_and_load_chapter(self) -> List[QImage]:
         # Issue #111: the downloader saves under the *sanitized* title
-        # folder and formats chapter labels for sorting ("2 Part 1" ->
-        # "2.01"), so the lookup must mirror those exact conventions.
-        # Raw title/label locations are kept as fallbacks for downloads
-        # that predate this fix.
-        from ...downloader import _format_chapter_number, _sanitize_filename
+        # folder and formats chapter labels for sorting ("2" -> "0002.000",
+        # "2 Part 1" -> "0002_Part 01"), so the lookup must mirror those
+        # exact conventions. Raw title locations and older label forms
+        # ("2", "2.01") are kept as fallbacks for earlier downloads.
+        from ...downloader import _sanitize_filename
+        from ...downloader.naming import (DEFAULT_NAMING_TEMPLATE,
+                                          _chapter_base_name,
+                                          _chapter_filename_labels)
 
         # Reset before resolving so a failed load can't leave a stale path
         # pointing at the previous chapter (issue #104).
@@ -1242,10 +1245,7 @@ class ReaderPage(BasePage):
         ch = str(self._chapter)
         download_dir = Path(self.app.config.download_dir)
 
-        labels = []
-        for label in (_format_chapter_number(ch), ch, f"{ch}.0"):
-            if label not in labels:
-                labels.append(label)
+        labels = _chapter_filename_labels(ch)
 
         manga_dirs = []
         for d in (download_dir / _sanitize_filename(title), download_dir / title):
@@ -1258,15 +1258,24 @@ class ReaderPage(BasePage):
 
         for manga_dir in manga_dirs:
             for label in labels:
-                # Sanitize the full base name, not just the title — the
-                # downloader builds "{title} - Chapter {chapter}" first
-                # and sanitizes the result (incl. the length cap).
-                base = _sanitize_filename(f"{title} - Chapter {label}")
-                for ext in [".pdf", ".epub", ".cbz", ".zip"]:
-                    filepath = manga_dir / f"{base}{ext}"
-                    if filepath.exists():
-                        self._artifact_path = filepath
-                        return _extract_images_from_file(filepath)
+                # Current downloads shorten a long title so the chapter
+                # text stays whole (labels[0] is the current form). Older
+                # versions sanitized the full "{title} - Chapter {label}"
+                # and cut its end at the length cap; keep that for the
+                # older label forms (and the raw label it shares).
+                bases = []
+                if label == labels[0]:
+                    bases.append(_chapter_base_name(
+                        DEFAULT_NAMING_TEMPLATE, title, label))
+                if label != labels[0] or label == ch:
+                    bases.append(
+                        _sanitize_filename(f"{title} - Chapter {label}"))
+                for base in dict.fromkeys(bases):
+                    for ext in [".pdf", ".epub", ".cbz", ".zip"]:
+                        filepath = manga_dir / f"{base}{ext}"
+                        if filepath.exists():
+                            self._artifact_path = filepath
+                            return _extract_images_from_file(filepath)
 
                 # The downloader only writes a single-component
                 # "Chapter <label>" folder, so require that exact shape

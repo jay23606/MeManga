@@ -13,7 +13,9 @@ from ..state import State
 from .errors import DownloaderError
 from .formats import (_build_comicinfo_xml, _images_to_cbz, _images_to_epub,
                       _images_to_folder, _images_to_pdf)
-from .naming import _format_chapter_number, _get_extension, _sanitize_filename
+from .naming import (DEFAULT_NAMING_TEMPLATE, _chapter_base_name,
+                     _format_chapter_number, _get_extension,
+                     _sanitize_filename)
 from .post_processing import _run_post_processing
 from .sources import ChapterWithSource, _configure_mangadex, _get_sources_from_manga
 
@@ -262,16 +264,14 @@ def download_chapter(
         manga_dir = output_dir / safe_title
         manga_dir.mkdir(parents=True, exist_ok=True)
 
-        # Zero-pad chapter numbers for proper sorting
+        # Zero-pad chapter numbers so file names sort in chapter order
+        # ("2" -> "0002.000"); see _format_chapter_number for the rules.
         chapter_str = _format_chapter_number(chapter.number)
 
-        # Build filename from template
-        template = naming_template or "{title} - Chapter {chapter}"
-        base_name = _sanitize_filename(
-            template.replace("{title}", title)
-                    .replace("{chapter}", chapter_str)
-                    .replace("{source}", source)
-        )
+        # Build filename from template; long names shorten the title so
+        # the chapter text stays whole and distinct.
+        template = naming_template or DEFAULT_NAMING_TEMPLATE
+        base_name = _chapter_base_name(template, title, chapter_str, source)
         credit = None
         if source in ("mangadex.org", "api.mangadex.org"):
             groups = getattr(chapter, "group_names", [])

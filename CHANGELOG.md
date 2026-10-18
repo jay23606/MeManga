@@ -120,6 +120,25 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #241 Downloaded chapter files and folders are named so that they sort in
+  chapter order, extension included, both by plain character order and
+  under locale sorting that skips punctuation. Numeric chapters use a
+  fixed-width number: four digits, a dot and three decimals
+  (`Chapter 0002.000`, `Chapter 0002.500`, `Chapter 0010.000`). Chapters
+  up to 9999 with up to three decimal places are ordered exactly. Part
+  chapters keep a readable label after their chapter's numeric names
+  (`Chapter 0002_Part 02`, `Chapter 0002_Part 10`) instead of the
+  decimal-looking `2.10`. Labels that the number alone would not spell
+  (`2.0`, `2.00`, `02`, `2.50`) get the source label added
+  (`Chapter 0002.000 (2.00)`), so different numeric chapters no longer
+  share a file and one download cannot replace another. Names for the same
+  chapter number stay together, in no fixed order among themselves. File
+  names are still capped at 100 characters, but a long manga title is now
+  shortened instead of the end of the name, so the chapter part is never
+  cut off. `{chapter}` in a custom naming template uses the same form.
+  Other labels such as `Extra` are unchanged. Existing files are not
+  renamed and still open in the reader. Post-processing `{chapter}` and
+  `MEMANGA_CHAPTER` still receive the original chapter number.
 - #406 `scripts/run.sh` and `scripts\windows\run.bat` no longer switch to
   the project folder before running MeManga. Relative paths such as
   `import backup.json` or `export backup.json` now resolve in the folder

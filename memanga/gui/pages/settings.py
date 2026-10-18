@@ -858,9 +858,11 @@ class SettingsPage(BasePage):
             return
         template = self._naming_entry.text().strip() or "{title} - Chapter {chapter}"
         from datetime import datetime
+        from ...downloader.naming import _format_chapter_number
         sample = {
             "title": "Chainsaw Man",
-            "chapter": "1",
+            # Same zero-padded form the downloader writes ("0001.000").
+            "chapter": _format_chapter_number("1"),
             "source": "mangadex.org",
             "date": datetime.now().strftime("%Y-%m-%d"),
             "author": "Tatsuki Fujimoto",
