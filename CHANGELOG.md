@@ -95,6 +95,11 @@ All notable changes are recorded here. Format loosely follows
   partial-chapter settings, and clears backup-delay clocks. A chapter
   saved as a partial again keeps its record and counts as not recovered
   (exit 3).
+- #222 `failed retry` reads each manga's chapter list from the primary
+  source once per run, instead of once for every failed chapter of that
+  manga. `check` and `failed retry` now process chapters through one
+  shared module, so their download, backup, partial, delivery and state
+  handling stay the same.
 - #351 `memanga check --quiet` on a terminal without `--download` now
   skips new chapters and exits 1 with a hint, as it already did without a
   terminal. It used to skip them silently and exit 0. `--quiet` never
