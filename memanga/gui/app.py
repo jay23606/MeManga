@@ -269,27 +269,11 @@ class MeMangaApp(QMainWindow):
         title = data.get("title", "")
         chapter = data.get("chapter", "")
         path = data.get("path", "")
-        partial = data.get("partial")
 
-        if partial:
-            miss = partial.get("failed_pages", [])
-            total = partial.get("total", 0)
-            self.app_state.add_partial_chapter(
-                title,
-                str(chapter),
-                source=data.get("source", ""),
-                failed_pages=miss,
-                total_pages=total,
-                path=path,
-                from_backup=bool(data.get("from_backup")),
-            )
-            self.app_state.add_notification(
-                "warn",
-                f"Downloaded {title} Ch. {chapter} as partial: "
-                f"{len(miss)}/{total} page(s) missing (pages {miss}).",
-            )
-        else:
-            self.app_state.clear_partial_chapter(title, str(chapter))
+        # The worker's chapter pipeline has already recorded the chapter
+        # (downloaded, partial or failed records, and the partial
+        # warning), the same way `memanga check` does (issue #295).
+        if not data.get("partial"):
             self.app_state.add_notification("download", f"Downloaded {title} Ch. {chapter}")
         self.events.publish("notification_added", {})
 
@@ -304,8 +288,6 @@ class MeMangaApp(QMainWindow):
             title=title, chapter=str(chapter),
             fmt=self.config.output_format, path=path, size_mb=size_mb,
         )
-        self.app_state.add_downloaded_chapter(title, str(chapter))
-        self.app_state.clear_failed_chapter(title, str(chapter))
 
         self._settle_new_chapter_download(
             title, data.get("task_id"), failed=False

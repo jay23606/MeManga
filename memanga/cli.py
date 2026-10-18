@@ -1252,6 +1252,9 @@ class _ConsoleChapterReporter(ChapterReporter):
     def deleted_after_send(self, path):
         console.print("     [dim]🗑️  Deleted local copy[/dim]")
 
+    def delete_failed(self, path, error):
+        err_console.print(f"     [yellow]⚠️  Could not delete local copy: {_esc(error)}[/yellow]")
+
     def email_failed(self, error):
         err_console.print(f"     [red]📧 Email failed: {_esc(error)}[/red]")
 

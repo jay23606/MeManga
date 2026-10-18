@@ -1,9 +1,9 @@
 """Process one chapter: download, recover, deliver and record it.
 
-``check`` and ``failed retry`` both run every chapter through
-:class:`ChapterPipeline` (issue #222), so backup recovery, partial-chapter
-salvage (issue #86), Kindle delivery, delete-after-send, failure records
-and state cleanup cannot drift between the two commands.
+``check``, ``failed retry`` and GUI downloads all run every chapter
+through :class:`ChapterPipeline` (issues #222, #295), so backup recovery,
+partial-chapter salvage (issue #86), Kindle delivery, delete-after-send,
+failure records and state cleanup cannot drift between them.
 
 The pipeline makes the decisions and writes state; it prints nothing.
 Progress goes to a :class:`ChapterReporter` while a chapter is processed
@@ -11,6 +11,7 @@ Progress goes to a :class:`ChapterReporter` while a chapter is processed
 the final result comes back as a :class:`ChapterOutcome`.
 """
 
+import threading
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .downloader import (DEFAULT_PAGE_RETRIES, ChapterWithSource,
                          DownloaderError, _find_chapter_on_backup,
                          _get_sources_from_manga, download_chapter)
-from .emailer import EmailError, send_to_kindle
+from .emailer import send_to_kindle
 
 
 class ChapterStatus(Enum):
@@ -52,6 +53,8 @@ class PipelineOptions:
     delivery_mode: str = "local"
     email: Dict[str, Any] = field(default_factory=dict)
     delete_after_send: bool = False
+    # ``None`` uses the downloader's default file name.
+    naming_template: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,19 @@ class ChapterOutcome:
         """True when a complete or partial chapter was saved."""
         return self.status is not ChapterStatus.FAILED
 
+    @property
+    def message(self) -> Optional[str]:
+        """Why a FAILED chapter failed, naming both sources when the
+        backup was tried too. This is the text of the failure record."""
+        if self.backup_error is not None:
+            return f"Primary: {self.error}; Backup: {self.backup_error}"
+        return self.error
+
+
+def chapter_source(manga: Dict[str, Any], chapter) -> str:
+    """The source a chapter is downloaded from, for records and events."""
+    return getattr(chapter, "source", None) or manga.get("source") or "unknown"
+
 
 class ChapterReporter:
     """Progress hooks called while a chapter is processed.
@@ -86,6 +102,13 @@ class ChapterReporter:
 
     def downloading(self, chapter):
         """About to download ``chapter`` from its own source."""
+
+    def progress(self, current, total):
+        """``current`` of ``total`` pages fetched in the current attempt.
+
+        Raising :class:`InterruptedError` cancels the download, like
+        setting the pipeline's ``cancel_event``.
+        """
 
     def trying_backup(self, error, backup_chapter):
         """The primary download failed with ``error``; trying the backup."""
@@ -108,8 +131,13 @@ class ChapterReporter:
     def deleted_after_send(self, path: Path):
         """The local copy was deleted after sending."""
 
-    def email_failed(self, error):
-        """Sending failed; the chapter still counts as saved."""
+    def delete_failed(self, path: Path, error: OSError):
+        """Sending worked but the local copy could not be deleted."""
+
+    def email_failed(self, error: Exception):
+        """Sending failed with ``error`` (usually an ``EmailError``, but
+        any delivery problem lands here); the chapter still counts as
+        saved and its file stays on disk."""
 
     def failed(self, outcome: ChapterOutcome):
         """Nothing could be saved; the failure has been recorded."""
@@ -125,7 +153,8 @@ class ChapterPipeline:
 
     The collaborators default to the real downloader and emailer; a caller
     may substitute its own (the CLI passes the names it imported, so they
-    can be replaced in one place).
+    can be replaced in one place). Setting ``cancel_event`` aborts the
+    download in progress with :class:`InterruptedError`.
     """
 
     options: PipelineOptions
@@ -135,6 +164,7 @@ class ChapterPipeline:
     find_backup: Callable[..., Optional[ChapterWithSource]] = _find_chapter_on_backup
     send: Callable[..., Any] = send_to_kindle
     app_password: Callable[[], Optional[str]] = _no_app_password
+    cancel_event: Optional[threading.Event] = None
 
     def process(self, manga: Dict[str, Any], chapter) -> ChapterOutcome:
         """Download ``chapter`` of ``manga`` and record the result.
@@ -144,7 +174,9 @@ class ChapterPipeline:
         (backup first, then primary) within the threshold. A saved
         chapter is delivered and marked downloaded; a chapter nothing
         could save is recorded as failed. Only :class:`DownloaderError`
-        is handled here; anything else propagates to the caller.
+        is handled here; anything else, including the
+        :class:`InterruptedError` of a cancelled download, propagates to
+        the caller without a record.
         """
         opts = self.options
         is_from_backup = isinstance(chapter, ChapterWithSource) and chapter.is_backup
@@ -165,7 +197,7 @@ class ChapterPipeline:
         return self._save(
             manga, chapter, path, partial,
             from_backup=False,
-            source=getattr(chapter, "source", None) or "unknown",
+            source=chapter_source(manga, chapter),
         )
 
     def _download(self, manga, chapter, partial, allow_partial=None):
@@ -189,6 +221,9 @@ class ChapterPipeline:
         return self.download(
             manga, chapter, opts.download_dir, opts.output_format,
             state=self.state,
+            progress_callback=self.reporter.progress,
+            naming_template=opts.naming_template,
+            cancel_event=self.cancel_event,
             max_retries=opts.max_retries,
             post_processing=opts.post_processing,
             **kwargs,
@@ -216,7 +251,7 @@ class ChapterPipeline:
                 return self._save(
                     manga, chapter, path, None,
                     from_backup=True,
-                    source=getattr(backup_ch, "source", None),
+                    source=chapter_source(manga, backup_ch),
                 )
 
         # 2) No complete chapter anywhere. With partial tolerance on,
@@ -239,17 +274,13 @@ class ChapterPipeline:
                 return self._save(
                     manga, chapter, path, partial,
                     from_backup=from_backup,
-                    source=getattr(candidate, "source", None),
+                    source=chapter_source(manga, candidate),
                 )
 
         # 3) Nothing worked — record the failure.
-        ch_source = chapter.source if isinstance(chapter, ChapterWithSource) else "unknown"
-        if backup_ch and backup_error is not None:
-            source = f"{ch_source}+{backup_ch.source}"
-            message = f"Primary: {error}; Backup: {backup_error}"
-        else:
-            source = ch_source
-            message = str(error)
+        source = chapter_source(manga, chapter)
+        if backup_error is not None:
+            source = f"{source}+{chapter_source(manga, backup_ch)}"
         outcome = ChapterOutcome(
             chapter=chapter.number,
             status=ChapterStatus.FAILED,
@@ -259,7 +290,7 @@ class ChapterPipeline:
         )
         self.reporter.failed(outcome)
         self.state.add_failed_chapter(
-            title, chapter.number, source, message,
+            title, chapter.number, source, outcome.message,
             failed_pages=getattr(error, "failed_pages", None),
         )
         return outcome
@@ -289,7 +320,7 @@ class ChapterPipeline:
             self.state.add_partial_chapter(
                 title,
                 chapter.number,
-                source=source or "",
+                source=source,
                 failed_pages=missing,
                 total_pages=total,
                 path=str(path),
@@ -323,6 +354,10 @@ class ChapterPipeline:
             self.reporter.email_skipped_folder(path)
             return DeliveryStatus.SKIPPED_FOLDER
         self.reporter.email_sending(path)
+        # The chapter is already saved, so no delivery problem may undo
+        # that: besides EmailError, preparing the attachment (reading or
+        # splitting the PDF into a temp folder) or reading the password
+        # can raise anything. Cancellation still propagates.
         try:
             self.send(
                 pdf_path=path,
@@ -332,11 +367,19 @@ class ChapterPipeline:
                 smtp_port=email.get("smtp_port", 587),
                 app_password=self.app_password(),
             )
-            self.reporter.email_sent(path)
-            if opts.delete_after_send:
-                path.unlink()
-                self.reporter.deleted_after_send(path)
-        except EmailError as error:
+        except InterruptedError:
+            raise
+        except Exception as error:
             self.reporter.email_failed(error)
             return DeliveryStatus.FAILED
+        self.reporter.email_sent(path)
+        if opts.delete_after_send:
+            # The chapter reached the Kindle; a copy that can't be deleted
+            # stays on disk rather than failing the chapter.
+            try:
+                path.unlink()
+            except OSError as error:
+                self.reporter.delete_failed(path, error)
+            else:
+                self.reporter.deleted_after_send(path)
         return DeliveryStatus.SENT
