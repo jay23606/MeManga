@@ -841,9 +841,9 @@ def test_issue_111_sanitized_title_folder(app_window, qapp, make_cbz):
 
 def test_issue_111_part_style_chapter_label(app_window, qapp, sample_manga,
                                             make_cbz):
-    """Part-style labels are formatted for archive sorting on disk
-    ("2 Part 1" -> "2.01"); the reader used to search for the raw label
-    only."""
+    """Part-style labels were formatted for archive sorting on disk
+    ("2 Part 1" -> "2.01" before #241); the reader used to search for the
+    raw label only. Those downloads must stay reachable."""
     from pathlib import Path
     app_window.config.set("manga", [sample_manga])
     dl = Path(app_window.config.download_dir) / sample_manga["title"]
@@ -858,6 +858,71 @@ def test_issue_111_part_style_chapter_label(app_window, qapp, sample_manga,
     reader = app_window._pages["reader"]
     assert reader._images, (
         "#111 regression: downloader-formatted part chapter unreachable")
+
+
+@pytest.mark.parametrize("chapter,stored", [
+    # Names written since #241.
+    ("10", "0010.000"),
+    ("2 Part 1", "0002_Part 01"),
+    ("2.5", "0002.500"),
+    ("2.0", "0002.000 (2.0)"),
+    # Names written by earlier versions stay reachable.
+    ("10", "10"),
+    ("2 Part 1", "2.01"),
+    ("2 Part 1", "2 Part 1"),
+    ("2.5", "2.5"),
+])
+def test_issue_241_reader_opens_padded_and_legacy_chapter_files(
+        app_window, qapp, sample_manga, make_cbz, chapter, stored):
+    """Issue #241: chapters are saved with zero-padded labels so file
+    managers sort them in order; the reader must open those files and
+    files saved under the older label forms."""
+    from pathlib import Path
+    app_window.config.set("manga", [sample_manga])
+    dl = Path(app_window.config.download_dir) / sample_manga["title"]
+    dl.mkdir(parents=True, exist_ok=True)
+    artifact = dl / f"{sample_manga['title']} - Chapter {stored}.cbz"
+    artifact.write_bytes(make_cbz(pages=2).read_bytes())
+    app_window.app_state.add_downloaded_chapter(sample_manga["title"], chapter)
+
+    app_window.show_page("reader", manga=sample_manga, chapter=chapter)
+    qapp.processEvents()
+    reader = app_window._pages["reader"]
+    assert reader._artifact_path == artifact
+    assert reader._images
+
+
+@pytest.mark.parametrize("chapter,current", [
+    ("2", True), ("2.0", True), ("2", False), ("2.5", False),
+])
+def test_issue_241_reader_opens_long_title_chapter_files(
+        app_window, qapp, make_cbz, chapter, current):
+    """Issue #241: with a long title the downloader shortens the title so
+    the chapter text stays whole; older versions cut the end of the whole
+    name. The reader must open both."""
+    from pathlib import Path
+    from memanga.downloader import _format_chapter_number, _sanitize_filename
+    from memanga.downloader.naming import _chapter_base_name
+    title = ("Long Title " * 9).strip()
+    manga = {"title": title, "url": "https://mangadex.org/title/z",
+             "source": "mangadex.org", "status": "reading", "mode": "manual"}
+    app_window.config.set("manga", [manga])
+    dl = Path(app_window.config.download_dir) / _sanitize_filename(title)
+    dl.mkdir(parents=True, exist_ok=True)
+    if current:
+        base = _chapter_base_name("{title} - Chapter {chapter}", title,
+                                  _format_chapter_number(chapter))
+    else:
+        base = _sanitize_filename(f"{title} - Chapter {chapter}")
+    artifact = dl / f"{base}.cbz"
+    artifact.write_bytes(make_cbz(pages=2).read_bytes())
+    app_window.app_state.add_downloaded_chapter(title, chapter)
+
+    app_window.show_page("reader", manga=manga, chapter=chapter)
+    qapp.processEvents()
+    reader = app_window._pages["reader"]
+    assert reader._artifact_path == artifact
+    assert reader._images
 
 
 def test_issue_111_raw_locations_still_load(app_window, qapp, make_cbz):
