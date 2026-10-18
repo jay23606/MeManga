@@ -174,7 +174,7 @@ class TestFallbackDelayMechanic:
         import memanga.downloader as dl
         scrapers_by_domain = {"primary.test": _PrimaryScraper(),
                               "backup.test": _BackupScraper()}
-        monkeypatch.setattr(dl, "get_scraper",
+        monkeypatch.setattr(dl.updates, "get_scraper",
                             lambda d: scrapers_by_domain[d])
 
         manga = {"title": "X", "fallback_delay_days": 2, "sources": [
@@ -209,7 +209,7 @@ class TestFallbackDelayMechanic:
             "primary.test": _PrimaryScraper(),
             "backup.test": _BackupScraper(),
         }
-        monkeypatch.setattr(dl, "get_scraper", lambda d: scrapers_by_domain[d])
+        monkeypatch.setattr(dl.updates, "get_scraper", lambda d: scrapers_by_domain[d])
 
         manga = {"title": "X", "fallback_delay_days": 2, "sources": [
             {"source": "primary.test", "url": "https://primary.test/x"},
@@ -619,7 +619,7 @@ class TestDownloadChapterErrors:
         import memanga.downloader as dl
         # get_scraper raises ValueError for unknown sources — that's
         # the contract `download_chapter` wraps into `DownloaderError`.
-        monkeypatch.setattr(dl, "get_scraper",
+        monkeypatch.setattr(dl.chapter, "get_scraper",
                             lambda d: (_ for _ in ()).throw(
                                 ValueError(f"unknown: {d}")))
         manga = {"title": "X", "url": "https://unknown.test/x",
@@ -677,7 +677,7 @@ class TestMangaDexCredit:
         url = "https://mangadex.org/chapter/abc"
         fake_state.get_available_chapters = lambda title: [
             {"number": "1", "url": url, "group_names": ["Group A"]}]
-        monkeypatch.setattr(dl, "get_scraper", lambda d: _PartialScraper(2, set()))
+        monkeypatch.setattr(dl.chapter, "get_scraper", lambda d: _PartialScraper(2, set()))
         chapter = types.SimpleNamespace(number="1", title="", url=url)
         manga = {"title": "Example", "url": "https://mangadex.org/title/x",
                  "source": "mangadex.org"}
@@ -694,7 +694,7 @@ class TestMangaDexCredit:
         fake_state.get_available_chapters = lambda title: [
             {"number": "1", "url": url, "group_ids": ["g-a"],
              "group_names": ["Group A"]}]
-        monkeypatch.setattr(dl, "get_scraper", lambda d: _PartialScraper(2, set()))
+        monkeypatch.setattr(dl.chapter, "get_scraper", lambda d: _PartialScraper(2, set()))
         chapter = types.SimpleNamespace(number="1", title="", url=url)
         manga = {"title": "Example", "url": "https://mangadex.org/title/x",
                  "source": "mangadex.org"}
@@ -731,7 +731,7 @@ class TestMangaDexCredit:
                 return {"mangadex.removed_group_ids": ["g-removed"]}.get(key, default)
 
         monkeypatch.setattr("memanga.config.Config", FakeConfig)
-        monkeypatch.setattr(dl, "get_scraper", lambda d: FakeMangaDex())
+        monkeypatch.setattr(dl.updates, "get_scraper", lambda d: FakeMangaDex())
         manga = {"title": "Example", "sources": [
             {"source": "mock.test", "url": "https://mock.test/x"},
             {"source": "mangadex.org", "url": "https://mangadex.org/title/x"}]}
@@ -743,7 +743,7 @@ class TestPartialChapterTolerance:
     def _patch(self, monkeypatch, num_pages, fail_indexes):
         import memanga.downloader as dl
         monkeypatch.setattr(
-            dl, "get_scraper",
+            dl.chapter, "get_scraper",
             lambda d: _PartialScraper(num_pages, fail_indexes))
 
     def test_disabled_by_default_raises_with_structured_detail(
