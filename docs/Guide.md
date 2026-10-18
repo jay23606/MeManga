@@ -504,11 +504,14 @@ These are the command-line equivalents if you prefer typing commands directly in
 ```bash
 run check                            # Interactive — asks y/n per chapter
 run check --download                 # Download all new chapters without asking
-run check -t "One Piece"             # Check one specific manga
-run check -t "One Piece" --download  # Download new chapters for one manga
+run check "One Piece"                # Check one specific manga
+run check "One Piece" --download     # Download new chapters for one manga
 run check --dry-run                  # Check only: list what's new, change nothing
 run check --auto --quiet             # What scheduled checks run (never prompts)
 ```
+
+The manga is a title or `#N` from `run list`. The older `-t "One Piece"`
+(`--title`) form still works and means the same.
 
 ### Check modes
 
@@ -556,14 +559,14 @@ That's all you need. MeManga downloads every chapter from chapter 1 onward. Safe
 The command-line equivalent, typed directly in your terminal (not inside the menu):
 
 ```bash
-run check -t "One Piece" --from 1 --download --safe
+run check "One Piece" --from 1 --download --safe
 ```
 
 **What each flag does:**
 
 | Flag | Purpose |
 |------|---------|
-| `-t "One Piece"` | Target a specific manga |
+| `"One Piece"` | Target a specific manga (`-t "One Piece"` also works) |
 | `--from 1` | Start from chapter 1 instead of where you left off |
 | `--download` | Download without prompting for each chapter (`--auto` and `--yes` are aliases) |
 | `--safe` | Restart the browser every 3 chapters to prevent memory buildup |
@@ -590,19 +593,19 @@ This downloads chapter 50, 51, 52, etc. Chapters you already have are automatica
 ### Using CLI commands
 
 ```bash
-run check -t "One Piece" --from 50 --download --safe
+run check "One Piece" --from 50 --download --safe
 ```
 
 Start from chapter 100 in EPUB format:
 
 ```bash
-run check -t "One Piece" --from 100 --download --safe --format epub
+run check "One Piece" --from 100 --download --safe --format epub
 ```
 
 Start from a decimal chapter:
 
 ```bash
-run check -t "One Piece" --from 55.5 --download
+run check "One Piece" --from 55.5 --download
 ```
 
 ---
@@ -737,7 +740,7 @@ run check --format epub
 Download one manga in CBZ:
 
 ```bash
-run check -t "One Piece" --format cbz --download
+run check "One Piece" --format cbz --download
 ```
 
 ---
@@ -979,25 +982,25 @@ else is kept.
 ### Change the primary URL
 
 ```bash
-run update "One Piece" -u "https://new-source.com/one-piece"
+run edit "One Piece" -u "https://new-source.com/one-piece"
 ```
 
 ### Add or change backup URL
 
 ```bash
-run update "One Piece" -b "https://mangadex.org/title/uuid-here"
+run edit "One Piece" -b "https://mangadex.org/title/uuid-here"
 ```
 
 ### Rename a manga
 
 ```bash
-run update "One Piece" -t "One Piece (Colored)"
+run edit "One Piece" -t "One Piece (Colored)"
 ```
 
 ### Remove the backup source
 
 ```bash
-run update "One Piece" --no-backup
+run edit "One Piece" --no-backup
 ```
 
 This removes every backup source and the fallback delay, like clearing the
@@ -1007,8 +1010,8 @@ silently removing it.
 ### Change the fallback delay
 
 ```bash
-run update "One Piece" --fallback-days 0
-run update "One Piece" -b "https://mangadex.org/title/uuid-here" --fallback-days 3
+run edit "One Piece" --fallback-days 0
+run edit "One Piece" -b "https://mangadex.org/title/uuid-here" --fallback-days 3
 ```
 
 `--fallback-days` takes whole numbers of days, 0 or greater. It needs a
@@ -1018,7 +1021,7 @@ in the same command. It cannot be combined with `--no-backup`.
 ### Change status, mode, or the Kindle toggle
 
 ```bash
-run update "One Piece" --status on-hold --mode manual --no-kindle
+run edit "One Piece" --status on-hold --mode manual --no-kindle
 ```
 
 | Flag | Values |
@@ -1043,7 +1046,7 @@ matches, nothing is written.
 ### You can also update by list number
 
 ```bash
-run update "#1" -u "https://new-source.com/one-piece"
+run edit "#1" -u "https://new-source.com/one-piece"
 ```
 
 ---
@@ -1194,9 +1197,9 @@ run import - --replace --yes < memanga_export.json
 | `run add -t "Title" -u URL --status on-hold --mode manual --no-kindle` | Add with status, mode and Kindle setting |
 | `run check` | Check for new chapters (interactive) |
 | `run check --download` | Download all new chapters without asking (`--auto`, `--yes` are aliases) |
-| `run check -t "Title"` | Check one manga |
-| `run check -t "Title" --from 1 --download --safe` | Download from chapter 1 |
-| `run check -t "Title" --from 50 --download` | Download from chapter 50 |
+| `run check "Title"` | Check one manga |
+| `run check "Title" --from 1 --download --safe` | Download from chapter 1 |
+| `run check "Title" --from 50 --download` | Download from chapter 50 |
 | `run check --format epub` | Override output format |
 | `run check --dry-run` | Check only: list new chapters, download and save nothing |
 | `run edit "Title" --status reading` | Set status to reading |
@@ -1210,17 +1213,17 @@ run import - --replace --yes < memanga_export.json
 | `run path "Title"` | Print the manga's download folder (only the path; exits `1` if nothing is downloaded yet) |
 | `run open "Title"` | Open the manga's download folder in the file manager |
 | `run remove "Title"` | Remove a manga |
-| `run update "Title" -u URL` | Change primary source URL |
-| `run update "Title" -b URL` | Change backup source URL |
-| `run update "Title" -t "New Name"` | Rename a manga |
-| `run update "Title" --no-backup` | Remove the backup source |
-| `run update "Title" --fallback-days 3` | Change the backup fallback delay |
-| `run update "Title" --status on-hold --mode manual --no-kindle` | Change status, mode and Kindle setting |
+| `run edit "Title" -u URL` | Change primary source URL |
+| `run edit "Title" -b URL` | Change backup source URL |
+| `run edit "Title" -t "New Name"` | Rename a manga |
+| `run edit "Title" --no-backup` | Remove the backup source |
+| `run edit "Title" --fallback-days 3` | Change the backup fallback delay |
+| `run edit "Title" --status on-hold --mode manual --no-kindle` | Change status, mode and Kindle setting |
 | `run config` | Configure settings (delivery, email, format) |
 | `run status` | Show overall status and config |
 | `run status --json` | Status and config as JSON, without secrets |
 | `run failed` | List failed and accepted-partial chapters (same as `run failed list`) |
-| `run failed list "Title"` | Only one manga (title or `#N`, matched like `check -t`) |
+| `run failed list "Title"` | Only one manga (title or `#N`, matched like `check TARGET`) |
 | `run failed retry` | Download every listed chapter again (`--retry` is an alias) |
 | `run failed retry "Title"` | Retry one manga only |
 | `run failed clear` | Forget every listed chapter (`--clear` is an alias) |
@@ -1340,7 +1343,7 @@ error (exit code `2`) and changes nothing.
 | `failed retry [TARGET]` | Downloads the chapters again the way `check --download` does: the primary source, then the backup source, then (with partial chapters turned on) the best partial copy. Saved chapters are emailed when delivery is email. |
 | `failed clear [TARGET]` | Forgets the records without downloading anything. |
 
-TARGET is a title or `#N` from `run list`, matched like `check -t`: an
+TARGET is a title or `#N` from `run list`, matched like `check TARGET`: an
 exact title (ignoring case) wins, then a unique part of a title. A target
 that matches nothing, or more than one manga, is an error (exit code `1`)
 and changes nothing. Manga you no longer track can still be targeted by

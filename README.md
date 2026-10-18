@@ -292,7 +292,7 @@ For a host cron job, run Compose from the repository directory:
 | `edit TITLE …` (`update`) | Edit status (`--status reading` / `on-hold` / `dropped` / `completed`), URL, backup (`--backup` / `--no-backup`), fallback days, title, mode or Kindle toggle; only the given fields change. `set TITLE STATUS` still works but is deprecated and will be removed in the next release |
 | `check [TITLE] [--dry-run \| --download] [--from N] [--safe]` | Look for new chapters (`TITLE` can also be given as `-t TITLE`). `--dry-run` only lists them; `--download` (aliases `--auto`, `--yes`) downloads without prompting; otherwise it asks on a terminal and downloads nothing without one |
 | `path TITLE` / `open TITLE` | Print a manga's download folder (only the path, for scripts) or open it in the file manager; a manga with nothing downloaded yet exits `1` |
-| `failed [list [TARGET]] [--json]` / `failed retry [TARGET]` / `failed clear [TARGET]` | List, re-download or forget failed and partial chapters; TARGET goes after the action and is a title or `#N`, matched like `check -t`. `--retry` / `--clear` are aliases of `retry` / `clear` |
+| `failed [list [TARGET]] [--json]` / `failed retry [TARGET]` / `failed clear [TARGET]` | List, re-download or forget failed and partial chapters; TARGET goes after the action and is a title or `#N`, matched like `check TITLE`. `--retry` / `--clear` are aliases of `retry` / `clear` |
 | `status [--json]` | Show config dir, download dir, manga count, last check time |
 | `doctor [--json] [--check NAME] [--smtp] [--launch-browsers]` | Diagnose install, paths, browsers, email, keyring, scheduler and source health |
 | `config` | Interactive settings editor |
@@ -353,7 +353,7 @@ server after a failed page.
 ### Backfill an entire series from chapter 1
 
 ```bash
-python -m memanga check -t "Blue Lock" --from 1 --download --safe
+python -m memanga check "Blue Lock" --from 1 --download --safe
 ```
 
 `--safe` restarts the browser every 3 chapters to keep memory usage

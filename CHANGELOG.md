@@ -22,7 +22,7 @@ All notable changes are recorded here. Format loosely follows
   `memanga completion bash` prints a bash completion script.
   Help and error messages always name the program `memanga`, also under
   `python -m memanga`. `check` takes its target as a positional argument
-  like `set`, `remove` and `update` (`check "Blue Lock"`); `-t TITLE`
+  like `edit` and `remove` (`check "Blue Lock"`); `-t TITLE`
   still works.
 - #354 `memanga export -` writes the backup JSON to stdout and
   `memanga import -` reads it from stdin. `import --dry-run` checks the
