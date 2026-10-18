@@ -153,7 +153,15 @@ class TestBashCompletion:
 
     def test_positional_choices(self, script):
         assert _complete(script, "completion", "") == ["bash"]
-        assert _complete(script, "set", "Some Title", "on") == ["on-hold"]
+        assert _complete(script, "edit", "Some Title", "--status", "on") == ["on-hold"]
+
+    def test_deprecated_set_is_not_offered(self, script):
+        # Issue #348: `set` still runs but is no longer advertised.
+        reply = _complete(script, "")
+        assert {"edit", "update"} <= set(reply)
+        assert "set" not in reply
+        assert _complete(script, "se") == ["search"]
+        assert _complete(script, "update", "Some Title", "--st") == ["--status"]
 
     def test_nested_actions_and_their_options(self, script):
         assert "retry" in _complete(script, "failed", "")

@@ -288,9 +288,8 @@ For a host cron job, run Compose from the repository directory:
 |---|---|
 | `list` (`ls`) [--json] | Show every tracked manga with status + chapter counts |
 | `add` | Add a manga; supports `-t TITLE -u URL [-b BACKUP_URL]` or `-i` interactive |
-| `set TITLE STATUS` | `reading` / `on-hold` / `dropped` / `completed` |
 | `remove TITLE` (`rm`) [--yes] [--purge-history] [--keep-files \| --delete-files] | Drop a manga from tracking. History and files are kept unless `--purge-history` / `--delete-files` is given; `--yes` only skips the confirmation |
-| `update TITLE …` (`edit`) | Edit URL, backup (`--backup` / `--no-backup`), fallback days, title, status, mode or Kindle toggle; only the given fields change |
+| `edit TITLE …` (`update`) | Edit status (`--status reading` / `on-hold` / `dropped` / `completed`), URL, backup (`--backup` / `--no-backup`), fallback days, title, mode or Kindle toggle; only the given fields change. `set TITLE STATUS` still works but is deprecated and will be removed in the next release |
 | `check [TITLE] [--dry-run \| --download] [--from N] [--safe]` | Look for new chapters (`TITLE` can also be given as `-t TITLE`). `--dry-run` only lists them; `--download` (aliases `--auto`, `--yes`) downloads without prompting; otherwise it asks on a terminal and downloads nothing without one |
 | `failed [list [TARGET]] [--json]` / `failed retry [TARGET]` / `failed clear [TARGET]` | List, re-download or forget failed and partial chapters; TARGET goes after the action and is a title or `#N`, matched like `check -t`. `--retry` / `--clear` are aliases of `retry` / `clear` |
 | `status [--json]` | Show config dir, download dir, manga count, last check time |

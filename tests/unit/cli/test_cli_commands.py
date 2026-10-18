@@ -133,7 +133,7 @@ class TestCompletionCommand:
         captured = capsys.readouterr()
         assert captured.err == ""
         tokens = set(captured.out.translate(str.maketrans('"|)', "   ")).split())
-        for name in ("list", "ls", "add", "set", "remove", "rm", "update",
+        for name in ("list", "ls", "add", "remove", "rm", "update",
                      "edit", "check", "status", "config", "cron", "sources",
                      "search", "export", "import", "failed", "doctor", "tui",
                      "completion"):
@@ -456,19 +456,70 @@ class TestRemoveCommand:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# `set` — change a manga's status
+# `edit --status` and the deprecated `set` — change a manga's status
 # ─────────────────────────────────────────────────────────────────────────
 
 
 class TestSetStatusCommand:
-    def test_set_status_round_trips(self, run_cli, config):
+    def _seed(self, config):
         config.set("manga", [{"title": "Stat", "url": "u",
                               "source": "mangadex.org",
                               "status": "reading"}])
         config.save()
+
+    def _status(self, config):
+        return [m for m in config.get("manga", []) if m["title"] == "Stat"][0]["status"]
+
+    @pytest.mark.parametrize("command", ["edit", "update"])
+    def test_edit_status_round_trips(self, run_cli, config, capsys, command):
+        self._seed(config)
+        capsys.readouterr()
+        assert run_cli(command, "Stat", "--status", "completed") == 0
+        assert self._status(config) == "completed"
+        assert "deprecated" not in capsys.readouterr().err
+
+    def test_set_status_round_trips(self, run_cli, config):
+        self._seed(config)
         run_cli("set", "Stat", "completed")
-        m = [m for m in config.get("manga", []) if m["title"] == "Stat"][0]
-        assert m["status"] == "completed"
+        assert self._status(config) == "completed"
+
+    def test_set_warns_with_edit_replacement(self, run_cli, config, capsys):
+        # Issue #348: `set` still works for one release, with the exact
+        # `edit` command on stderr and stdout unchanged.
+        self._seed(config)
+        capsys.readouterr()
+        assert run_cli("set", "#1", "on-hold") == 0
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err
+        assert "memanga edit '#1' --status on-hold" in captured.err
+        assert "deprecated" not in captured.out
+        assert "on-hold" in captured.out
+        assert self._status(config) == "on-hold"
+
+    def test_set_warning_quotes_the_target(self, run_cli, config, capsys):
+        self._seed(config)
+        capsys.readouterr()
+        assert run_cli("set", "missing title", "dropped") == 1
+        assert ("memanga edit 'missing title' --status dropped"
+                in capsys.readouterr().err)
+
+    def test_help_shows_edit_not_set(self, run_cli, capsys):
+        assert run_cli("--help") == 0
+        out = capsys.readouterr().out
+        usage = out.split("\n\n")[0]
+        assert "edit (update)" in out
+        assert ",set," not in usage and "{set," not in usage
+        lines = [ln.split() for ln in out.splitlines()]
+        assert not any(words and words[0] == "set" for words in lines)
+
+    def test_set_help_still_works(self, run_cli, capsys):
+        assert run_cli("set", "--help") == 0
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Deprecated: use 'memanga edit TARGET --status STATUS'" in out
+
+    def test_update_help_names_edit(self, run_cli, capsys):
+        assert run_cli("update", "--help") == 0
+        assert capsys.readouterr().out.startswith("usage: memanga edit ")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -3703,6 +3754,7 @@ class TestExitCodes:
     @pytest.mark.parametrize("argv", [
         ("remove", "missing-title", "--yes"),
         ("set", "missing-title", "completed"),
+        ("edit", "missing-title", "--status", "completed"),
         ("update", "missing-title", "--title", "New"),
         ("check", "-t", "missing-title"),
         ("check", "missing-title"),
@@ -3716,6 +3768,7 @@ class TestExitCodes:
     @pytest.mark.parametrize("argv", [
         ("remove", "missing-title", "--yes"),
         ("set", "missing-title", "completed"),
+        ("edit", "missing-title", "--status", "completed"),
         ("update", "missing-title", "--title", "New"),
         ("check", "-t", "missing-title"),
         ("check", "missing-title"),
@@ -3739,6 +3792,7 @@ class TestExitCodes:
     def test_usage_error_keeps_argparse_exit_2(self, run_cli, config):
         self._seed(config, "Tracked")
         assert run_cli("set", "Tracked", "not-a-status") == 2
+        assert run_cli("edit", "Tracked", "--status", "not-a-status") == 2
 
     def test_keyboard_interrupt_exits_130(self, run_cli, monkeypatch, capsys):
         from memanga import cli
@@ -4252,6 +4306,7 @@ class TestTargetMatching:
 
     @pytest.mark.parametrize("argv", [
         ("set", "one", "dropped"),
+        ("edit", "one", "--status", "dropped"),
         ("update", "one", "--title", "New"),
         ("check", "-t", "one"),
     ])
@@ -4271,19 +4326,19 @@ class TestTargetMatching:
 
     def test_exact_match_wins_over_substring(self, run_cli, config):
         self._seed(config, "One Piece Colored", "One Piece")
-        assert run_cli("set", "one piece", "dropped") == 0
+        assert run_cli("edit", "one piece", "--status", "dropped") == 0
         assert self._status(config, "One Piece") == "dropped"
         assert self._status(config, "One Piece Colored") == "reading"
 
     def test_unique_substring_still_matches(self, run_cli, config):
         self._seed(config, "One Piece", "Berserk")
-        assert run_cli("set", "berse", "on-hold") == 0
+        assert run_cli("edit", "berse", "--status", "on-hold") == 0
         assert self._status(config, "Berserk") == "on-hold"
 
     def test_numeric_title_is_a_title(self, run_cli, config):
         # "1" used to mean the first entry; it is now a title lookup.
         self._seed(config, "Berserk", "86", "1")
-        assert run_cli("set", "86", "completed") == 0
+        assert run_cli("edit", "86", "--status", "completed") == 0
         assert self._status(config, "86") == "completed"
         assert run_cli("rm", "1", "--yes") == 0
         assert self._titles(config) == ["Berserk", "86"]
@@ -4309,7 +4364,7 @@ class TestTargetMatching:
 
     def test_bare_number_exact_title_beside_substring(self, run_cli, config):
         self._seed(config, "Mob Psycho 100", "1")
-        assert run_cli("set", "1", "dropped") == 0
+        assert run_cli("edit", "1", "--status", "dropped") == 0
         assert self._status(config, "1") == "dropped"
         assert self._status(config, "Mob Psycho 100") == "reading"
 
@@ -4325,7 +4380,7 @@ class TestTargetMatching:
 
     def test_hash_index_selects_entry(self, run_cli, config):
         self._seed(config, "Berserk", "86")
-        assert run_cli("set", "#2", "dropped") == 0
+        assert run_cli("edit", "#2", "--status", "dropped") == 0
         assert self._status(config, "86") == "dropped"
         assert run_cli("rm", "#1", "--yes") == 0
         assert self._titles(config) == ["86"]

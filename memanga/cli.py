@@ -263,7 +263,7 @@ def _list_entries(statuses=None, sort: str = DEFAULT_LIST_SORT, reverse: bool = 
     """Entries for `list` and `list --json`, filtered and sorted.
 
     `n` is always the position in the full list, so `#N` keeps working
-    with set/update/remove after filtering or sorting. Sorting is stable
+    with edit/remove after filtering or sorting. Sorting is stable
     with ties kept in list order, and entries without a value (unknown
     status, no numeric last chapter) go last in either direction.
     """
@@ -682,7 +682,19 @@ def cmd_remove(args):
 
 
 def cmd_set_status(args):
-    """Set manga status (reading, on-hold, dropped, completed)."""
+    """Set manga status (reading, on-hold, dropped, completed).
+
+    Deprecated by issue #348: `edit TARGET --status STATUS` replaces it.
+    Kept for one release, hidden from help and completion; stdout and
+    exit codes are unchanged so existing scripts keep working.
+    """
+    import shlex
+
+    sys.stderr.write(
+        "warning: 'memanga set' is deprecated and will be removed in the next "
+        "release; use: memanga edit "
+        f"{shlex.quote(args.target)} --status {shlex.quote(args.status)}\n"
+    )
     manga_list = config.get("manga", [])
     
     if not manga_list:
@@ -2942,6 +2954,7 @@ Examples:
   memanga check "Solo Leveling"         # Check one manga (same as -t)
   memanga check --download              # Download new chapters, no prompts
   memanga check --dry-run               # Only list new chapters
+  memanga edit "#1" --status on-hold    # Change a manga's status
   memanga doctor                        # Diagnose setup problems
   memanga cron install                  # Set up daily checks
   memanga config                        # Configure settings
@@ -3015,12 +3028,6 @@ Examples:
                        help="Add even if the source might be unsupported or a similar title is tracked")
     p_add.set_defaults(func=cmd_add)
     
-    # set (change manga status)
-    p_set = subparsers.add_parser("set", help="Set manga status (reading/on-hold/dropped/completed)")
-    p_set.add_argument("target", help="Manga title, or #N for its number in 'memanga list'")
-    p_set.add_argument("status", choices=VALID_STATUSES, help="New status")
-    p_set.set_defaults(func=cmd_set_status)
-    
     # remove
     p_remove = subparsers.add_parser("remove", aliases=["rm"], help="Remove a manga")
     p_remove.add_argument("target", help="Manga title, or #N for its number in 'memanga list'")
@@ -3036,10 +3043,11 @@ Examples:
                              help="Also delete its download folder (<download dir>/<title>)")
     p_remove.set_defaults(func=cmd_remove)
 
-    # update
-    # Issue #350: `edit` is an alias; only the fields given are changed.
+    # edit
+    # Issue #350: only the fields given are changed. Issue #348: `edit` is
+    # the command name, `update` stays an alias.
     p_update = subparsers.add_parser(
-        "update", aliases=["edit"],
+        "edit", aliases=["update"],
         help="Edit a manga's sources, title, status, mode, Kindle toggle or fallback delay",
         description="Change only the fields given; everything else is kept. Output format "
                     "is global (memanga config, or check --format); there is no per-manga format.",
@@ -3055,7 +3063,7 @@ Examples:
                           help="Days to wait before using the backup (0 or more); "
                                "needs a backup source")
     p_update.add_argument("-t", "--title", help="Rename manga title (moves its history and downloads)")
-    p_update.add_argument("--status", choices=VALID_STATUSES, help="New status (same as 'memanga set')")
+    p_update.add_argument("--status", choices=VALID_STATUSES, help="New status")
     p_update.add_argument("--mode", choices=["auto", "manual"], help="Desktop-app download mode")
     p_update_kindle = p_update.add_mutually_exclusive_group()
     p_update_kindle.add_argument("--kindle", dest="send_to_kindle", action="store_const", const=True,
@@ -3063,6 +3071,18 @@ Examples:
     p_update_kindle.add_argument("--no-kindle", dest="send_to_kindle", action="store_const", const=False,
                                  help="Turn the desktop app's per-manga Kindle toggle off")
     p_update.set_defaults(func=cmd_update)
+
+    # set: deprecated by issue #348 in favour of `edit TARGET --status`.
+    # Registered without help= so it stays out of the command list and the
+    # completion script; it still runs for one release.
+    p_set = subparsers.add_parser(
+        "set",
+        description="Deprecated: use 'memanga edit TARGET --status STATUS'. "
+                    "'set' will be removed in the next release.",
+    )
+    p_set.add_argument("target", help="Manga title, or #N for its number in 'memanga list'")
+    p_set.add_argument("status", choices=VALID_STATUSES, help="New status")
+    p_set.set_defaults(func=cmd_set_status)
 
     # check
     p_check = subparsers.add_parser(
@@ -3086,7 +3106,7 @@ Examples:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # Issue #248: positional TARGET like set/remove/update; -t stays.
+    # Issue #248: positional TARGET like edit/remove; -t stays.
     p_check.add_argument("target", nargs="?", metavar="TARGET",
                          help="Check one manga only (title, or #N from 'memanga list')")
     p_check.add_argument("-t", "--title", help="Same as TARGET")
@@ -3281,6 +3301,12 @@ Examples:
     )
     p_completion.add_argument("shell", choices=completion.SHELLS, help="Target shell")
     p_completion.set_defaults(func=cmd_completion)
+
+    # Keep the deprecated `set` out of the usage line too; argparse would
+    # otherwise list every registered name there.
+    subparsers.metavar = "{" + ",".join(
+        name for name, sub in subparsers.choices.items() if sub is not p_set
+    ) + "}"
 
     return parser
 
