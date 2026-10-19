@@ -112,12 +112,16 @@ def check_for_updates(
         raise DownloaderError(f"No sources configured for '{title}'")
     
     # Get starting chapter - use from_chapter if provided, else last downloaded
+    has_last_chapter = False
     if from_chapter is not None:
         # Subtract small amount so --from 1 includes chapter 1
         last_num = from_chapter - 0.001
     else:
+        # Stored labels such as "10 Part 1" or "Extra" are parsed the same
+        # way as the scraped chapters they are compared against (#228).
         last_chapter = state.get_last_chapter(title)
-        last_num = float(last_chapter) if last_chapter else 0.0
+        has_last_chapter = bool(last_chapter)
+        last_num = Chapter(number=str(last_chapter)).numeric if has_last_chapter else 0.0
     
     # Results to return
     chapters_to_download: List[ChapterWithSource] = []
@@ -246,8 +250,13 @@ def check_for_updates(
 
         catalogue_trusted = True
         # Only score when we have a download baseline and the user isn't
-        # explicitly bulk-downloading with from_chapter.
-        if from_chapter is None and last_num > 0:
+        # explicitly bulk-downloading with from_chapter. A stored label with
+        # no number ("Extra") parses to 0.0 but is still download history, so
+        # it is scored against a known catalogue baseline instead of
+        # bypassing the guard (#228).
+        if from_chapter is None and (
+            last_num > 0 or (has_last_chapter and baseline > 0)
+        ):
             from ..suspicion import evaluate_new_chapters
 
             guard_from = max(last_num, baseline)
