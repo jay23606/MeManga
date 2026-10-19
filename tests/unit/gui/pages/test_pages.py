@@ -32,11 +32,11 @@ def test_pages_handle_theme_switch(app_window, qapp, theme):
         theme.set_theme("dark", qapp); qapp.processEvents()
 
 
-def test_download_complete_logs_history_and_leaves_records_to_pipeline(
+def test_download_complete_leaves_records_and_history_to_pipeline(
         app_window, qapp):
-    # Issue #295: the worker's chapter pipeline writes the chapter
-    # records before it publishes download_complete; the handler only
-    # logs the download and must not write a second set of records.
+    # Issues #295, #240: the worker's chapter pipeline writes the chapter
+    # records and the download history before it publishes
+    # download_complete; the handler must not write a second set.
     app_window.app_state.add_failed_chapter("M", "1", "mock.test", "boom")
     history_before = len(app_window.app_state.get("download_history", []))
 
@@ -44,8 +44,7 @@ def test_download_complete_logs_history_and_leaves_records_to_pipeline(
     qapp.processEvents()
 
     history = app_window.app_state.get("download_history", [])
-    assert len(history) == history_before + 1
-    assert (history[-1]["title"], history[-1]["chapter"]) == ("M", "1")
+    assert len(history) == history_before
     assert any(n["message"] == "Downloaded M Ch. 1"
                for n in app_window.app_state.get("notifications", []))
     assert "1" in app_window.app_state.get_failed_chapters("M")

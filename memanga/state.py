@@ -926,8 +926,14 @@ class State:
     # ========================================================================
 
     def add_download_history(self, title: str, chapter: str, fmt: str,
-                             path: str = "", size_mb: float = 0, kindle_sent: bool = False):
-        """Log a completed download."""
+                             path: str = "", size_mb: float = 0, kindle_sent: bool = False,
+                             *, source: Optional[str] = None, from_backup: bool = False,
+                             partial: bool = False):
+        """Log a completed download.
+
+        ``source`` is where the chapter came from; ``from_backup`` and
+        ``partial`` mark a backup-source save and an accepted partial.
+        """
         with self._locked() as data:
             if "download_history" not in data:
                 data["download_history"] = []
@@ -938,6 +944,9 @@ class State:
                 "path": path,
                 "size_mb": round(size_mb, 2),
                 "kindle_sent": kindle_sent,
+                "source": source,
+                "from_backup": from_backup,
+                "partial": partial,
                 "timestamp": datetime.now().isoformat(),
             })
             data["download_history"] = data["download_history"][-200:]
