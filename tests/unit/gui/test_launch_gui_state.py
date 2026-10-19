@@ -162,3 +162,23 @@ def test_startup_problem_none_for_healthy_objects():
     from memanga.gui import _startup_problem
     ok = types.SimpleNamespace(load_error=None, config_path="c")
     assert _startup_problem(ok, types.SimpleNamespace(load_error=None)) is None
+
+
+def test_locked_config_dir_shows_error_and_loads_nothing(cfg_dir, fake_qt,
+                                                          lock_holder):
+    """Issue #244: another process (a check, another window) holds the
+    config directory; the GUI must not load and later overwrite it."""
+    (cfg_dir / "state.json").write_text("{bad", encoding="utf-8")
+    lock_holder.hold(cfg_dir)
+    assert _launch() == 1
+    assert "already running" in fake_qt["critical"][0]
+    assert str(cfg_dir) in fake_qt["critical"][0]
+    assert fake_qt["windows"] == []
+    # Not even loaded: a damaged file would have been copied aside.
+    assert (cfg_dir / "state.json").read_text(encoding="utf-8") == "{bad"
+
+
+def test_window_holds_the_config_dir_lock(cfg_dir, fake_qt, lock_holder):
+    assert _launch() == 0
+    assert len(fake_qt["windows"]) == 1
+    assert not lock_holder.can_lock(cfg_dir)

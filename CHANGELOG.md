@@ -120,6 +120,21 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #244 Only one MeManga process at a time changes a config directory, so
+  a cron `check`, a manual command and the desktop app no longer overwrite
+  each other's downloads, failed records, reading progress or imports.
+  Commands that change config or state take a lock on the directory
+  (`memanga.lock`) before loading anything; while another check, command
+  or the desktop app holds it they exit 1 with a message on stderr and
+  change nothing, and the desktop app shows an error instead of starting.
+  Read-only commands (`list`, `status`, `path`, `open`, `sources`,
+  `export`, `doctor`, `failed` listing, `config show/get/path`,
+  `cron status`, `search --json` without `--add`) still run. The system
+  releases the lock when the process ends, even after a crash, so there
+  is nothing to clean up. Scheduled checks use the same lock. A
+  read-only command leaves a damaged `state.json` untouched while another
+  process holds the lock, and `export` refuses to write over MeManga's own
+  files in the config directory.
 - #243 A damaged `state.json` is no longer replaced by empty state. It
   is kept as `state.json.corrupt-<time>-<id>`, the previous copy is
   restored from `state.json.bak` when there is one, and the CLI (on

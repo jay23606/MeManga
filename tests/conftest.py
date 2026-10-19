@@ -12,6 +12,7 @@ Everything every test needs lives here:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -57,6 +58,82 @@ def isolated_home(monkeypatch, tmp_path) -> Path:
     monkeypatch.delenv("MEMANGA_CONFIG_DIR", raising=False)
     (tmp_path / ".config" / "memanga").mkdir(parents=True, exist_ok=True)
     return tmp_path
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Config directory lock (issue #244): a real second process holds it
+# ─────────────────────────────────────────────────────────────────────────
+
+_HOLD_LOCK = """
+import sys
+from memanga.process_lock import ConfigDirLock
+ConfigDirLock(sys.argv[1]).acquire()
+print("locked", flush=True)
+sys.stdin.readline()
+"""
+
+_TRY_LOCK = """
+import sys
+from memanga.process_lock import ConfigDirBusy, ConfigDirLock
+try:
+    ConfigDirLock(sys.argv[1]).acquire()
+except ConfigDirBusy:
+    sys.exit(3)
+"""
+
+
+class LockHolder:
+    """Holds config directory locks from separate Python processes."""
+
+    def __init__(self):
+        self._procs = []
+
+    def _python(self, code, config_dir, **kwargs):
+        return [sys.executable, "-c", code, str(config_dir)], dict(
+            cwd=str(_REPO_ROOT), text=True, **kwargs)
+
+    def hold(self, config_dir) -> subprocess.Popen:
+        """Start a process that holds the lock until release()/kill()."""
+        cmd, kwargs = self._python(_HOLD_LOCK, config_dir)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, **kwargs)
+        self._procs.append(proc)
+        if proc.stdout.readline().strip() != "locked":
+            proc.kill()
+            _, err = proc.communicate(timeout=30)
+            raise RuntimeError(f"lock holder failed: {err}")
+        return proc
+
+    def release(self, proc):
+        """Let the holder exit normally, releasing its lock."""
+        proc.stdin.close()
+        proc.wait(timeout=30)
+
+    def can_lock(self, config_dir) -> bool:
+        """True when another process could take the lock right now."""
+        cmd, kwargs = self._python(_TRY_LOCK, config_dir)
+        result = subprocess.run(cmd, capture_output=True, timeout=60, **kwargs)
+        if result.returncode not in (0, 3):
+            raise RuntimeError(f"lock probe failed: {result.stderr}")
+        return result.returncode == 0
+
+    def close(self):
+        for proc in self._procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=30)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                pipe.close()
+
+
+@pytest.fixture
+def lock_holder() -> Iterator[LockHolder]:
+    holder = LockHolder()
+    try:
+        yield holder
+    finally:
+        holder.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────

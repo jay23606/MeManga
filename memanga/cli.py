@@ -36,14 +36,16 @@ from .backup import (
 )
 from .config import (CONFIG_KEYS, Config, ConfigError, UnknownConfigKey,
                      config_key_spec, config_section_problems,
-                     config_value_problem, get_app_password,
-                     parse_config_value, set_app_password)
+                     config_value_problem, default_config_dir,
+                     get_app_password, parse_config_value, set_app_password)
 from .cron import (build_cron_line, build_task_command, managed_lines,
                    read_crontab,
                    remove_managed_lines, replace_managed_line,
                    source_checkout_root, unmanaged_memanga_lines)
 from . import __version__, completion, doctor
 from .persist import SaveError
+from .process_lock import (LOCK_FILENAME, ConfigDirBusy, ConfigDirLock,
+                           ConfigDirLockError)
 from .state import State, _chapter_number, _chapter_sort_key
 from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, DEFAULT_PAGE_RETRIES, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
 from .scrapers import get_scraper
@@ -125,17 +127,92 @@ def resolve_config_dir(cli_value=None) -> Optional[Path]:
     return Path(value).expanduser().absolute()
 
 
-def build_context(config_dir=None) -> CliContext:
+def build_context(config_dir=None, recover_state=True) -> CliContext:
     """Build Config and State under ``config_dir`` (None = default).
 
     Config is tolerant so a broken config.yaml still reaches `doctor`;
-    main() refuses every other command (issue #250).
+    main() refuses every other command (issue #250). ``recover_state``
+    is False when the config directory is not locked (issue #244): a
+    damaged state.json is then left as it is.
     """
     return CliContext(
         config=Config(config_dir, tolerate_errors=True),
-        state=State(config_dir),
+        state=State(config_dir, recover=recover_state),
         config_dir=config_dir,
     )
+
+
+# Issue #244: commands that only read config.yaml/state.json run while
+# another process holds the config directory lock. Everything else,
+# including any command added later, takes the lock.
+READ_ONLY_COMMANDS = ("list", "ls", "status", "path", "open", "sources",
+                      "export", "doctor")
+READ_ONLY_CONFIG_ACTIONS = ("show", "get", "path")
+
+# Held from before Config/State are loaded until main() has saved the
+# last state; released by main().
+_config_lock: Optional[ConfigDirLock] = None
+
+
+def _needs_config_lock(args) -> bool:
+    """True when the parsed command may change config or state."""
+    if args.gui:
+        return True
+    if args.command in READ_ONLY_COMMANDS:
+        return False
+    if args.command == "config":
+        action = getattr(args, "config_action", None)
+        if action:
+            return action not in READ_ONLY_CONFIG_ACTIONS
+        return not args.show
+    if args.command == "failed":
+        return _failed_action(args) != "list"
+    if args.command == "cron":
+        return args.action != "status"
+    if args.command == "search":
+        # Only --add or the interactive prompt add a manga.
+        return not args.json or args.add is not None
+    return True
+
+
+def _acquire_config_lock(config_dir: Path, required: bool = True) -> bool:
+    """Lock ``config_dir`` for this process or exit 1 (issue #244).
+
+    Nothing has been loaded or written yet when this refuses. With
+    ``required=False`` a lock that cannot be taken returns False instead.
+    """
+    global _config_lock
+    lock = ConfigDirLock(config_dir)
+    try:
+        lock.acquire()
+    except ConfigDirBusy:
+        if not required:
+            return False
+        sys.stderr.write(
+            f"error: another MeManga process is using {config_dir} "
+            "(a running check, the desktop app or another command).\n"
+            "Wait for it to finish, then retry. Read-only commands such as "
+            "`memanga list` and `memanga status` still work.\n"
+        )
+        sys.exit(EXIT_ERROR)
+    except ConfigDirLockError as e:
+        if not required:
+            return False
+        sys.stderr.write(
+            f"error: cannot lock {config_dir}: {e.error.strerror or e.error}\n"
+            "MeManga needs a config directory on a file system that "
+            "supports file locks.\n"
+        )
+        sys.exit(EXIT_ERROR)
+    _config_lock = lock
+    return True
+
+
+def _release_config_lock():
+    global _config_lock
+    if _config_lock is not None:
+        _config_lock.release()
+        _config_lock = None
 
 
 def use_context(ctx: CliContext) -> CliContext:
@@ -2433,6 +2510,75 @@ def cmd_search(args):
     return _error(f"[yellow]⚠️  {_esc(message)}[/yellow]")
 
 
+# Issue #244: export runs without the config directory lock, so it must
+# never write over the files MeManga itself keeps there (also their
+# backups and recovery copies).
+_OWN_FILES = ("config.yaml", "state.json", LOCK_FILENAME)
+
+
+def _is_own_file_name(name: str) -> bool:
+    """config.yaml, state.json, memanga.lock, or one of their backups,
+    recovery copies or temps (``<own name>.<anything>``)."""
+    name = name.casefold()
+    return name in _OWN_FILES or name.startswith(
+        tuple(f"{own}." for own in _OWN_FILES))
+
+
+class _UnverifiedTarget(Exception):
+    """An existing export destination could not be told apart from
+    MeManga's own files."""
+
+
+def _own_file_target(path: Path) -> bool:
+    """True when writing ``path`` would write one of MeManga's own files,
+    also through a symlink, a hard link or another spelling of the
+    config directory.
+
+    Raises _UnverifiedTarget when ``path`` exists but its identity, or
+    that of the files in the config directory, cannot be established:
+    a hard link has a name of its own, so only the identity tells.
+    """
+    root = config.config_dir
+    target = Path(os.path.realpath(path))
+    try:
+        in_root = os.path.samefile(target.parent, root)
+    except OSError:
+        in_root = False
+    if in_root and _is_own_file_name(target.name):
+        return True
+    try:
+        target_stat = os.stat(target)
+    except FileNotFoundError:
+        return False  # a new file is no alias
+    except OSError as e:
+        raise _UnverifiedTarget(e.strerror or e) from e
+    # Identity is st_dev + st_ino (os.path.samestat); a zero st_ino means
+    # the file system gives no file ID to compare.
+    if not target_stat.st_ino:
+        raise _UnverifiedTarget("the file system reports no file ID")
+    # Compare with every own file in the config directory, backups and
+    # recovery copies included. os.stat(), not DirEntry.stat(): on
+    # Windows the latter leaves st_ino at zero.
+    try:
+        with os.scandir(root) as entries:
+            own = [entry.path for entry in entries
+                   if _is_own_file_name(entry.name)]
+    except OSError as e:
+        raise _UnverifiedTarget(e.strerror or e) from e
+    for own_path in own:
+        try:
+            own_stat = os.stat(own_path)
+        except FileNotFoundError:
+            continue  # replaced or removed since the listing
+        except OSError as e:
+            raise _UnverifiedTarget(e.strerror or e) from e
+        if not own_stat.st_ino:
+            raise _UnverifiedTarget("the file system reports no file ID")
+        if os.path.samestat(target_stat, own_stat):
+            return True
+    return False
+
+
 def cmd_export(args):
     """Export manga list and download state to JSON.
 
@@ -2459,6 +2605,21 @@ def cmd_export(args):
         return None
 
     output_path = Path(output_file)
+    try:
+        own_target = _own_file_target(output_path)
+    except _UnverifiedTarget as e:
+        return _error(
+            f"[red]Cannot export to {_esc(output_path)}:[/red] MeManga "
+            "could not make sure it is not one of its own files in "
+            f"{_esc(config.config_dir)} ({_esc(e)}). "
+            "Nothing was written. Export to a new file name instead."
+        )
+    if own_target:
+        return _error(
+            f"[red]Cannot export to {_esc(output_path)}:[/red] it is one of "
+            f"MeManga's own files in {_esc(config.config_dir)}. Choose "
+            "another file name."
+        )
     try:
         with open(output_path, "w") as f:
             json.dump(export_data, f, indent=2, default=str)
@@ -3080,6 +3241,15 @@ def cmd_completion(args):
 # ============================================================================
 
 def main():
+    # Issue #244: the config directory lock outlives _main() so the
+    # interrupt handlers below still save state while holding it.
+    try:
+        _run_main()
+    finally:
+        _release_config_lock()
+
+
+def _run_main():
     # Issue #239: handled here, not under __main__, so `python -m memanga`
     # and the installed `memanga` script also exit 130 without a traceback.
     try:
@@ -3652,9 +3822,20 @@ def _main():
     # writes to the config directory.
     if args.command == "completion" and not args.gui:
         sys.exit(args.func(args))
-    use_context(build_context(
-        None if args.gui else resolve_config_dir(args.config_dir)
-    ))
+    config_dir = None if args.gui else resolve_config_dir(args.config_dir)
+    # Issue #244: lock before loading, so no other process can write
+    # between this load and our last save.
+    lock_dir = config_dir or default_config_dir()
+    locked = _needs_config_lock(args)
+    if locked:
+        _acquire_config_lock(lock_dir)
+    ctx = build_context(config_dir, recover_state=locked)
+    # A read-only command found a damaged state.json: repair it only
+    # while holding the lock (kept until main() ends), else leave it
+    # untouched and report it through state.load_error.
+    if ctx.state.needs_recovery and _acquire_config_lock(lock_dir, required=False):
+        ctx = build_context(config_dir)
+    use_context(ctx)
 
     # Only doctor and `config path/edit` may run on fallback defaults;
     # anything else could act on an empty manga list or overwrite the
