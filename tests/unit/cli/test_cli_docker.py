@@ -78,7 +78,8 @@ class TestCliOnlyEnvVar:
         monkeypatch.setattr(sys, "argv", ["memanga", "--gui"])
         import memanga.cli as cli
         launched = []
-        fake_gui = types.SimpleNamespace(launch_gui=lambda: launched.append(True))
+        fake_gui = types.SimpleNamespace(
+            launch_gui=lambda **kwargs: launched.append(True))
         monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
         cli.main()
         assert launched == [True]

@@ -43,6 +43,7 @@ from .cron import (build_cron_line, build_task_command, managed_lines,
                    remove_managed_lines, replace_managed_line,
                    source_checkout_root, unmanaged_memanga_lines)
 from . import __version__, completion, doctor
+from .persist import SaveError
 from .state import State, _chapter_number, _chapter_sort_key
 from .downloader import DEFAULT_FALLBACK_DELAY_DAYS, DEFAULT_PAGE_RETRIES, check_for_updates, download_chapter, get_supported_sources, DownloaderError, ChapterWithSource, restart_browsers, _find_chapter_on_backup, _get_sources_from_manga, _configure_mangadex
 from .scrapers import get_scraper
@@ -3098,6 +3099,18 @@ def main():
             "results can't be recorded.[/red]"
         )
         sys.exit(EXIT_ERROR)
+    except SaveError as e:
+        # Issue #243: a failed config/state save (full disk, permissions)
+        # ends the command with a message instead of a traceback.
+        err_console.print(
+            f"[red]❌ Could not save {_esc(e.path.name)}: "
+            f"{_esc(e.error.strerror or e.error)}[/red]")
+        err_console.print(
+            f"[red]{_esc(e.path)} and its backup were not changed by this "
+            "save. Free up disk space or check the folder's permissions, "
+            "then retry.[/red]"
+        )
+        sys.exit(EXIT_ERROR)
 
 
 class TerminationRequested(BaseException):
@@ -3630,7 +3643,8 @@ def _main():
             p_config.error(f"{legacy[0]} cannot be combined with the "
                            f"'{args.config_action}' action")
 
-    # The GUI builds its own Config/State under the default root.
+    # The GUI always uses the default root; main() loads Config/State
+    # there and hands them to launch_gui().
     if args.gui and args.config_dir:
         parser.error("--config-dir is not supported with --gui")
 
@@ -3655,6 +3669,17 @@ def _main():
             "Fix or move the file, then retry. Run `memanga doctor` for details.\n"
         )
         sys.exit(1)
+    # Issue #243: same rule for a state file that could not be loaded,
+    # copied aside or restored; a damaged file that was copied aside and
+    # replaced only warns.
+    if state.load_error and not broken_config_ok:
+        sys.stderr.write(
+            f"error: cannot load state file: {state.load_error}\n"
+            "Fix or move the file, then retry. Run `memanga doctor` for details.\n"
+        )
+        sys.exit(1)
+    if state.recovery_notice:
+        sys.stderr.write(f"warning: {state.recovery_notice}\n")
 
     if args.gui:
         if _cli_only:
@@ -3663,7 +3688,9 @@ def _main():
             )
             sys.exit(1)
         from .gui import launch_gui
-        launch_gui()
+        # Hand over the loaded state so the GUI can show its recovery
+        # notice; a second State() would find the repaired file.
+        launch_gui(config=config, state=state)
         return
 
     with _sigterm_as_shutdown():

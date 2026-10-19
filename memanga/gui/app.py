@@ -24,12 +24,13 @@ from .pages.base import BasePage
 class MeMangaApp(QMainWindow):
     """Main application window."""
 
-    def __init__(self):
+    def __init__(self, config=None, app_state=None):
         super().__init__()
 
-        # Shared state
-        self.config = Config()
-        self.app_state = State()
+        # Shared state. launch_gui() passes the objects it already loaded
+        # and checked (issue #243).
+        self.config = config if config is not None else Config()
+        self.app_state = app_state if app_state is not None else State()
         # Order matters: the repair only applies to configs that were
         # already seeded on an earlier launch, so it has to read the
         # flag before seeding sets it.
