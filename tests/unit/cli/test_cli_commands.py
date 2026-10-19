@@ -4201,6 +4201,317 @@ class TestCheckExitCodes:
         assert "Interrupted" in err
 
 
+class TestChapterCheckpoint:
+    """Each finished chapter reaches state.json before the next one starts,
+    and SIGTERM saves state like Ctrl-C (issue #230)."""
+
+    TITLE = "Vinland Saga"
+
+    @pytest.fixture
+    def library(self, config):
+        config.set("delivery.mode", "email")
+        config.set("email.kindle_email", "reader@example.com")
+        config.set("email.sender_email", "sender@example.com")
+        config.set("manga", [{
+            "title": self.TITLE,
+            "status": "reading",
+            "sources": [
+                {"source": "primary.test", "url": "https://primary.test/vs"},
+                {"source": "backup.test", "url": "https://backup.test/vs"},
+            ],
+        }])
+        config.save()
+        return config
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        from memanga import cli
+        sent = []
+        monkeypatch.setattr(cli, "send_to_kindle",
+                            lambda **kw: sent.append(kw["pdf_path"].name))
+        monkeypatch.setattr(cli, "get_app_password", lambda cfg: "pw")
+        return sent
+
+    @staticmethod
+    def _on_disk(isolated_home):
+        from memanga.state import State
+        return State(isolated_home / ".config" / "memanga")
+
+    @staticmethod
+    def _chapter(number, source="primary.test", is_backup=False):
+        return types.SimpleNamespace(
+            number=number, title="", url=f"https://{source}/c/{number}",
+            source=source, is_backup=is_backup)
+
+    def _two_new_chapters(self, monkeypatch):
+        from memanga import cli
+        chapters = [self._chapter("71"), self._chapter("72")]
+        monkeypatch.setattr(cli, "check_for_updates", lambda *a, **k: chapters)
+        monkeypatch.setattr(
+            cli, "_find_chapter_on_backup",
+            lambda manga, number, *a, **k: self._chapter(
+                number, "backup.test", is_backup=True))
+
+    @pytest.mark.parametrize("route", ["primary", "backup", "partial"])
+    def test_check_records_each_chapter_before_the_next(
+            self, run_cli, library, sent, isolated_home, monkeypatch,
+            tmp_path, route):
+        from memanga import cli
+        from memanga.downloader import DownloaderError
+
+        if route == "partial":
+            library.set("partial_chapters.enabled", True)
+            library.set("partial_chapters.threshold_percent", 10)
+            library.save()
+        self._two_new_chapters(monkeypatch)
+        seen = []
+
+        def fake_download(manga, chapter, *a, **k):
+            path = tmp_path / f"{chapter.source}-{chapter.number}.pdf"
+            path.write_bytes(b"%PDF")
+            if chapter.number == "72":
+                seen.append(self._on_disk(isolated_home))
+                return path
+            if route == "primary":
+                return path
+            if not chapter.is_backup:
+                raise DownloaderError("primary incomplete",
+                                      failed_pages=[13], total_pages=40)
+            if route == "backup":
+                return path
+            if not k.get("allow_partial"):
+                raise DownloaderError("backup incomplete",
+                                      failed_pages=[7], total_pages=40)
+            k["on_partial"]([7], 40)
+            return path
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+
+        assert run_cli("check", "--auto", "--quiet") == 0
+
+        # While chapter 72 downloads, chapter 71 is already sent and on disk.
+        [disk] = seen
+        assert sent[0].endswith("-71.pdf")
+        assert disk.is_chapter_downloaded(self.TITLE, "71")
+        assert not disk.is_chapter_downloaded(self.TITLE, "72")
+        [entry] = disk.get_download_history()
+        assert entry["chapter"] == "71" and entry["kindle_sent"]
+        assert entry["from_backup"] == (route != "primary")
+        assert entry["partial"] == (route == "partial")
+        partial = disk.get_partial_chapter(self.TITLE, "71")
+        assert (partial is not None) is (route == "partial")
+        assert disk.get_failed_chapters(self.TITLE) == {}
+
+    def test_failed_retry_records_each_chapter_before_the_next(
+            self, run_cli, config, state, isolated_home, monkeypatch,
+            tmp_path):
+        from memanga import cli
+        from memanga.scrapers.base import Chapter
+
+        config.set("manga", [{
+            "title": self.TITLE, "status": "reading",
+            "source": "primary.test", "url": "https://primary.test/vs",
+        }])
+        config.save()
+        for number in ("71", "72"):
+            state.add_failed_chapter(self.TITLE, number, "primary.test",
+                                     "timeout")
+
+        class FakeScraper:
+            def get_chapters(self, url):
+                return [Chapter(number=n, title="", url=f"{url}/{n}", date=None)
+                        for n in ("71", "72")]
+        monkeypatch.setattr(cli, "get_scraper", lambda source: FakeScraper())
+        seen = []
+
+        def fake_download(manga, chapter, *a, **k):
+            if chapter.number == "72":
+                seen.append(self._on_disk(isolated_home))
+            path = tmp_path / f"{chapter.number}.pdf"
+            path.write_bytes(b"%PDF")
+            return path
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+
+        assert run_cli("failed", "--retry") == 0
+
+        [disk] = seen
+        assert disk.is_chapter_downloaded(self.TITLE, "71")
+        assert list(disk.get_failed_chapters(self.TITLE)) == ["72"]
+        assert self._on_disk(isolated_home).get_failed_chapters(self.TITLE) == {}
+
+    def test_checkpoint_failure_stops_before_more_downloads(
+            self, run_cli, config, sent, isolated_home, monkeypatch,
+            tmp_path, capsys):
+        # A per-manga `except Exception` must not swallow it: the next
+        # chapter and the next manga are never downloaded or sent.
+        from memanga import cli
+        from memanga.state import State
+
+        config.set("delivery.mode", "email")
+        config.set("email.kindle_email", "reader@example.com")
+        config.set("email.sender_email", "sender@example.com")
+        config.set("manga", [
+            {"title": t, "source": "primary.test",
+             "url": f"https://primary.test/{t}", "status": "reading"}
+            for t in ("Alpha", "Beta")
+        ])
+        config.save()
+        monkeypatch.setattr(
+            cli, "check_for_updates",
+            lambda *a, **k: [self._chapter("1"), self._chapter("2")])
+        downloaded = []
+
+        def fake_download(manga, chapter, *a, **k):
+            downloaded.append((manga["title"], chapter.number))
+            path = tmp_path / f"{manga['title']}-{chapter.number}.pdf"
+            path.write_bytes(b"%PDF")
+            return path
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+
+        def _disk_full(self):
+            raise OSError("disk full")
+        monkeypatch.setattr(State, "save", _disk_full)
+        capsys.readouterr()
+
+        assert run_cli("check", "--auto", "--quiet") == 1
+
+        assert downloaded == [("Alpha", "1")]
+        assert sent == ["Alpha-1.pdf"]
+        err = capsys.readouterr().err
+        assert "Could not save state: disk full" in err
+        assert "Stopped" in err
+        # The run ended before the end-of-check record.
+        assert self._on_disk(isolated_home).get("last_check") is None
+
+    def test_chapter_error_still_checkpoints_what_was_recorded(
+            self, run_cli, config, isolated_home, monkeypatch, tmp_path,
+            capsys):
+        # Alpha's chapter is marked downloaded, then the pipeline raises;
+        # the record must be on disk before Beta is checked.
+        from memanga import cli
+        from memanga.state import State
+
+        config.set("manga", [
+            {"title": t, "source": "primary.test",
+             "url": f"https://primary.test/{t}", "status": "reading"}
+            for t in ("Alpha", "Beta")
+        ])
+        config.save()
+        seen = []
+
+        def _updates(manga, *a, **k):
+            if manga["title"] == "Beta":
+                seen.append(self._on_disk(isolated_home))
+                return []
+            return [self._chapter("1")]
+        monkeypatch.setattr(cli, "check_for_updates", _updates)
+
+        def fake_download(manga, chapter, *a, **k):
+            path = tmp_path / "Alpha-1.pdf"
+            path.write_bytes(b"%PDF")
+            return path
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+
+        def _broken_history(self, *a, **k):
+            raise RuntimeError("history broke")
+        monkeypatch.setattr(State, "add_download_history", _broken_history)
+        capsys.readouterr()
+
+        assert run_cli("check", "--auto", "--quiet") == 3
+        assert "Unexpected error: history broke" in capsys.readouterr().err
+        [disk] = seen
+        assert disk.is_chapter_downloaded("Alpha", "1")
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="SIGTERM can't be raised and caught in-process on Windows")
+    def test_sigterm_saves_state_and_exits_143(
+            self, run_cli, library, sent, isolated_home, monkeypatch,
+            tmp_path, capsys):
+        import signal
+        from memanga import cli
+
+        self._two_new_chapters(monkeypatch)
+
+        def fake_download(manga, chapter, *a, **k):
+            if chapter.number == "72":
+                # Marked dirty only; the SIGTERM path must write it.
+                cli.state.add_notification("info", "before SIGTERM")
+                signal.raise_signal(signal.SIGTERM)
+                raise AssertionError("SIGTERM did not stop the download")
+            path = tmp_path / f"{chapter.number}.pdf"
+            path.write_bytes(b"%PDF")
+            return path
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+        before = signal.getsignal(signal.SIGTERM)
+        capsys.readouterr()
+
+        assert run_cli("check", "--auto", "--quiet") == 143
+
+        assert "Terminated" in capsys.readouterr().err
+        assert sent == ["71.pdf"]
+        disk = self._on_disk(isolated_home)
+        assert disk.is_chapter_downloaded(self.TITLE, "71")
+        assert not disk.is_chapter_downloaded(self.TITLE, "72")
+        assert any(n["message"] == "before SIGTERM"
+                   for n in disk.get_notifications())
+        assert disk.get("last_check") is None
+        assert signal.getsignal(signal.SIGTERM) == before
+
+    def test_sigterm_handler_is_restored_after_a_command(
+            self, run_cli, monkeypatch):
+        import signal
+        from memanga import cli
+
+        seen = []
+
+        def _list(args):
+            seen.append(signal.getsignal(signal.SIGTERM))
+        monkeypatch.setattr(cli, "cmd_list", _list)
+
+        def previous(signum, frame):
+            pass
+        old = signal.signal(signal.SIGTERM, previous)
+        try:
+            assert run_cli("list") == 0
+            assert signal.getsignal(signal.SIGTERM) is previous
+        finally:
+            signal.signal(signal.SIGTERM, old)
+        assert seen == [cli._raise_termination]
+
+    def test_sigterm_handler_not_installed_off_the_main_thread(self):
+        import signal
+        import threading
+        from memanga import cli
+
+        before = signal.getsignal(signal.SIGTERM)
+        result = []
+
+        def _run():
+            try:
+                with cli._sigterm_as_shutdown():
+                    result.append(signal.getsignal(signal.SIGTERM))
+            except Exception as e:  # signal.signal() raises off-main-thread
+                result.append(e)
+        worker = threading.Thread(target=_run)
+        worker.start()
+        worker.join(timeout=10)
+        assert result == [before]
+
+    def test_gui_launch_does_not_take_over_sigterm(
+            self, monkeypatch, isolated_home):
+        import signal
+        from memanga import cli
+
+        monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["memanga", "--gui"])
+        before = signal.getsignal(signal.SIGTERM)
+        seen = []
+        fake_gui = types.SimpleNamespace(
+            launch_gui=lambda: seen.append(signal.getsignal(signal.SIGTERM)))
+        monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
+        cli.main()
+        assert seen == [before]
+
+
 class TestCheckModes:
     """Check-only, download and ask modes of `check` (#351)."""
 

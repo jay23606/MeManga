@@ -120,6 +120,15 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #230 `check` and `failed retry` write `state.json` after every chapter,
+  so a run that is killed, crashes or times out no longer forgets
+  chapters it already saved and sent, and the next run does not download
+  or send them again. If the state file can't be written, the command
+  stops with exit 1 before downloading or sending anything else. SIGTERM
+  (cron `timeout`, `systemctl stop`, `docker stop`) now saves pending
+  state like Ctrl-C and exits 143. A chapter can still be sent twice if
+  the process dies after sending it and before its state is written.
+  The desktop app is unchanged.
 - #241 Downloaded chapter files and folders are named so that they sort in
   chapter order, extension included, both by plain character order and
   under locale sorting that skips punctuation. Numeric chapters use a
