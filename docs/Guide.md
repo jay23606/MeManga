@@ -1362,10 +1362,11 @@ cron jobs can rely on these exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `check`: no new chapters, a `--dry-run` listing, every chapter downloaded, or a suspicious batch withheld (the warning goes to stderr) |
-| `1` | Error: manga not found, invalid input, refused or failed command, `check` could not check any manga, or `check` skipped chapters that needed confirmation (no terminal, or `--quiet`, without `--download`) |
+| `1` | Error: manga not found, invalid input, refused or failed command, `check` could not check any manga, `check` skipped chapters that needed confirmation (no terminal, or `--quiet`, without `--download`), or `check`/`failed retry` could not write `state.json` after a chapter (the run stops there) |
 | `2` | Invalid command-line usage |
 | `3` | `check` or `failed retry` ran, but some chapters (or some manga's source checks) failed |
 | `130` | Interrupted with Ctrl-C |
+| `143` | Stopped by SIGTERM (for example a cron `timeout` or a service stop); pending state is saved first |
 
 When `check` both skips unconfirmed chapters and has failures, it exits
 `1`.

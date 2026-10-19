@@ -10,8 +10,11 @@ import os
 import platform
 import re
 import shutil
+import signal
 import sys
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +62,7 @@ EXIT_ERROR = 1          # operational error: not found, invalid input, refused
 EXIT_USAGE = 2          # usage error (raised by argparse itself)
 EXIT_PARTIAL = 3        # check / failed retry ran but some chapters failed
 EXIT_INTERRUPTED = 130  # Ctrl-C
+EXIT_TERMINATED = 143   # SIGTERM (128 + 15): cron timeout, service stop
 
 
 def _esc(value) -> str:
@@ -1298,6 +1302,45 @@ def _chapter_pipeline(output_format=None, max_retries=DEFAULT_PAGE_RETRIES,
     )
 
 
+class StateCheckpointError(Exception):
+    """state.json could not be written after a chapter (issue #230)."""
+
+
+def _checkpoint_state():
+    """Write state now; raise StateCheckpointError on failure.
+
+    save(), not flush(): some mutators save() without marking state
+    dirty, so after one of them failed flush() would see nothing to
+    write. The write is atomic; a failure leaves the previous file.
+    """
+    try:
+        state.save()
+    except Exception as e:
+        raise StateCheckpointError(str(e)) from e
+
+
+def _process_chapter(pipeline: ChapterPipeline, manga, chapter):
+    """Run one chapter through ``pipeline`` and persist the result before
+    the caller moves on (issue #230).
+
+    The pipeline only marks state dirty (the GUI batches its writes), so
+    without this a CLI process killed later in a long run lost chapters
+    it had already saved and sent, and the next run sent them again.
+    The checkpoint also runs when the chapter raised, so whatever was
+    recorded before the error is kept. If it fails, StateCheckpointError
+    propagates past the per-manga error handling and ends the command:
+    continuing would download and deliver chapters that cannot be
+    recorded.
+    """
+    try:
+        outcome = pipeline.process(manga, chapter)
+    except Exception:
+        _checkpoint_state()
+        raise
+    _checkpoint_state()
+    return outcome
+
+
 def cmd_check(args):
     """Check for new chapters and download them.
 
@@ -1464,7 +1507,7 @@ def cmd_check(args):
                 if not should_download:
                     continue
 
-                if pipeline.process(manga, ch).saved:
+                if _process_chapter(pipeline, manga, ch).saved:
                     total_downloaded += 1
                     # Safe mode: restart browser every 3 chapters to free memory
                     if getattr(args, 'safe', False) and total_downloaded % 3 == 0:
@@ -1472,6 +1515,10 @@ def cmd_check(args):
                 else:
                     total_failed += 1
 
+        except StateCheckpointError:
+            # Ends the run (#230): no further chapter may be downloaded or
+            # delivered once results can't be recorded.
+            raise
         except DownloaderError as e:
             err_console.print(f"  [red]└─ Error: {_esc(e)}[/red]")
             total_errored += 1
@@ -2806,7 +2853,7 @@ def cmd_failed(args):
 
                 console.print(f"  [dim]⬇️  Retrying {_esc(manga_title)} Chapter {_esc(chapter_num)}...[/dim]")
                 retried += 1
-                outcome = pipeline.process(manga, ch_obj)
+                outcome = _process_chapter(pipeline, manga, ch_obj)
                 # Saved again as a partial is not a recovery: the record stays.
                 if outcome.status is ChapterStatus.COMPLETE:
                     succeeded += 1
@@ -3040,13 +3087,60 @@ def main():
         _flush_state_on_interrupt()
         err_console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(EXIT_INTERRUPTED)
+    except TerminationRequested:
+        _flush_state_on_interrupt()
+        err_console.print("\n[dim]Terminated.[/dim]")
+        sys.exit(EXIT_TERMINATED)
+    except StateCheckpointError as e:
+        err_console.print(f"[red]❌ Could not save state: {_esc(e)}[/red]")
+        err_console.print(
+            "[red]Stopped: nothing more is downloaded or sent while "
+            "results can't be recorded.[/red]"
+        )
+        sys.exit(EXIT_ERROR)
+
+
+class TerminationRequested(BaseException):
+    """Raised by the CLI's SIGTERM handler (issue #230).
+
+    A BaseException, like KeyboardInterrupt, so the commands' ``except
+    Exception`` handlers let it through to main(), which saves state.
+    """
+
+
+def _raise_termination(signum, frame):
+    raise TerminationRequested(signum)
+
+
+@contextmanager
+def _sigterm_as_shutdown():
+    """Turn SIGTERM into TerminationRequested while a CLI command runs.
+
+    Python's default SIGTERM action exits without cleanup, so a cron
+    `timeout` or a service stop lost state not yet written (issue #230).
+    Only the main thread may install handlers, and the GUI never runs
+    under this, so Qt keeps its own shutdown. The previous handler is
+    restored afterwards.
+    """
+    if (not hasattr(signal, "SIGTERM")
+            or threading.current_thread() is not threading.main_thread()):
+        yield
+        return
+    previous = signal.signal(signal.SIGTERM, _raise_termination)
+    try:
+        yield
+    finally:
+        # None: the handler wasn't installed from Python.
+        signal.signal(signal.SIGTERM,
+                      signal.SIG_DFL if previous is None else previous)
 
 
 def _flush_state_on_interrupt():
-    """Persist state marked dirty before Ctrl-C (issue #234).
+    """Persist state marked dirty before Ctrl-C (issue #234) or SIGTERM
+    (issue #230).
 
-    `check` only saves at the end via update_last_check(), so chapters
-    already recorded as downloaded would otherwise be lost. Best effort:
+    Each finished chapter is already checkpointed; this keeps whatever
+    else was marked dirty before the signal (e.g. notifications). Best effort:
     a failed write must not replace the interrupt with a traceback.
     """
     if state is None:
@@ -3281,8 +3375,9 @@ Examples:
             "they don't download by themselves.\n\n"
             "Exit codes: 0 no new chapters, chapters listed or all downloaded, or a\n"
             "suspicious batch withheld (warning on stderr); 1 every checked manga\n"
-            "failed, the target was not found, or chapters needed confirmation;\n"
-            "2 usage error; 3 some chapters or manga failed; 130 interrupted."
+            "failed, the target was not found, chapters needed confirmation, or\n"
+            "state.json could not be written; 2 usage error; 3 some chapters or\n"
+            "manga failed; 130 interrupted; 143 terminated (SIGTERM)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3571,18 +3666,19 @@ def _main():
         launch_gui()
         return
 
-    if args.command is None:
-        # Default to TUI, but never drop automation into the menu (#258).
-        if not _stdin_is_tty():
-            parser.print_help(sys.stderr)
-            sys.exit(cmd_tui(args))
-        cmd_tui(args)
-    elif hasattr(args, 'func'):
-        result = args.func(args)
-        if result:
-            sys.exit(result)
-    else:
-        parser.print_help()
+    with _sigterm_as_shutdown():
+        if args.command is None:
+            # Default to TUI, but never drop automation into the menu (#258).
+            if not _stdin_is_tty():
+                parser.print_help(sys.stderr)
+                sys.exit(cmd_tui(args))
+            cmd_tui(args)
+        elif hasattr(args, 'func'):
+            result = args.func(args)
+            if result:
+                sys.exit(result)
+        else:
+            parser.print_help()
 
 
 if __name__ == "__main__":
