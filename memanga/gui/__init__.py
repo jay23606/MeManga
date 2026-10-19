@@ -340,6 +340,24 @@ def _set_windows_app_user_model_id():
         pass
 
 
+def _lock_problem(error):
+    """Dialog text for a config directory the GUI could not lock (#244)."""
+    from ..process_lock import ConfigDirBusy
+    if isinstance(error, ConfigDirBusy):
+        return (
+            "MeManga is already running for this library:\n"
+            f"{error.config_dir}\n\n"
+            "Another window, a running check or another memanga command "
+            "is using it. Close it or wait for it to finish, then start "
+            "MeManga again."
+        )
+    return (
+        f"MeManga could not lock its folder:\n{error.config_dir}\n\n"
+        f"{error.error.strerror or error.error}\n\n"
+        "MeManga needs a folder on a file system that supports file locks."
+    )
+
+
 def _startup_problem(config, state):
     """Message for a config or state file the GUI cannot run on, or None.
 
@@ -370,7 +388,8 @@ def launch_gui(config=None, state=None):
     from PySide6.QtCore import QTimer
     from .app import MeMangaApp
     from . import theme as T
-    from ..config import Config
+    from ..config import Config, default_config_dir
+    from ..process_lock import ConfigDirBusy, ConfigDirLock, ConfigDirLockError
     from ..state import State
 
     # Must run before QApplication() so the taskbar honours our icon.
@@ -391,6 +410,18 @@ def launch_gui(config=None, state=None):
     app_icon = _load_app_icon()
     if app_icon is not None:
         qapp.setWindowIcon(app_icon)
+
+    # Issue #244: the window keeps config and state loaded and saves
+    # them for the whole session, so it holds the config directory lock
+    # until the process exits. Taken before loading; under `memanga --gui`
+    # the CLI already holds it and this only joins that lock.
+    config_dir = config.config_dir if config is not None else default_config_dir()
+    lock = ConfigDirLock(config_dir)
+    try:
+        lock.acquire()
+    except (ConfigDirBusy, ConfigDirLockError) as e:
+        QMessageBox.critical(None, "MeManga", _lock_problem(e))
+        sys.exit(1)
 
     if config is None:
         config = Config(tolerate_errors=True)

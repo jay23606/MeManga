@@ -1123,6 +1123,39 @@ Same commands as macOS:
 
 On headless servers (no display), make sure `xvfb` is installed — the setup script handles this on Debian/Ubuntu.
 
+### One MeManga at a time
+
+Only one MeManga process changes a config directory at a time: a check,
+any other command that changes your library or settings, or the desktop
+app (for as long as its window is open). They hold a lock on the
+directory (`memanga.lock` next to `state.json`). A second one exits `1`
+with this message on stderr and changes nothing:
+
+```
+error: another MeManga process is using ~/.config/memanga (a running check, the desktop app or another command).
+```
+
+A scheduled check that runs while the desktop app is open or another
+check is still running is skipped this way, and the next run picks up
+where it left off. Read-only commands (`list`, `status`, `path`, `open`,
+`sources`, `export`, `doctor`, `failed` without `retry`/`clear`,
+`config show`/`get`/`path`, `cron status` and `search --json` without
+`--add`) still run. A read-only command never repairs a damaged
+`state.json` while another process holds the lock: it stops with exit
+`1`, says nothing was changed, and the next command that can take the
+lock copies the damaged file aside and restores the backup as usual.
+`export` refuses to write over MeManga's own files in the config
+directory (`config.yaml`, `state.json`, `memanga.lock`, their backups
+and recovery copies), also through a link. When the destination already
+exists and MeManga cannot check that it is not one of those files (for
+example on a file system without file IDs), it refuses too and writes
+nothing; export to a new file name instead.
+
+The system releases the lock when the process ends, even after a crash
+or a kill, so `memanga.lock` never needs to be deleted. A config
+directory on a file system without file-lock support is refused with
+`cannot lock`; use a directory on a local disk.
+
 ---
 
 ## Export and Import
@@ -1362,7 +1395,7 @@ cron jobs can rely on these exit codes:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `check`: no new chapters, a `--dry-run` listing, every chapter downloaded, or a suspicious batch withheld (the warning goes to stderr) |
-| `1` | Error: manga not found, invalid input, refused or failed command, `check` could not check any manga, `check` skipped chapters that needed confirmation (no terminal, or `--quiet`, without `--download`), or `check`/`failed retry` could not write `state.json` after a chapter (the run stops there) |
+| `1` | Error: manga not found, invalid input, refused or failed command, `check` could not check any manga, `check` skipped chapters that needed confirmation (no terminal, or `--quiet`, without `--download`), or `check`/`failed retry` could not write `state.json` after a chapter (the run stops there), or another MeManga process is using the config directory |
 | `2` | Invalid command-line usage |
 | `3` | `check` or `failed retry` ran, but some chapters (or some manga's source checks) failed |
 | `130` | Interrupted with Ctrl-C |

@@ -582,6 +582,32 @@ class TestCorruptStateRecovery:
         assert again.recovery_notice is None
         assert again.get_downloaded_chapters("Berserk") == ["1", "2"]
 
+    @pytest.mark.parametrize("backup", [None, '{"manga": {}}'])
+    def test_without_recovery_damaged_file_is_left_alone(self, cfg_dir, backup):
+        """Issue #244: an unlocked reader never preserves, removes or
+        restores; it refuses and leaves every file as it was."""
+        from memanga.state import State, StateError
+        (cfg_dir / "state.json").write_text("{truncated")
+        if backup is not None:
+            (cfg_dir / "state.json.bak").write_text(backup)
+        before = sorted((p.name, p.read_bytes()) for p in cfg_dir.iterdir())
+
+        s = State(config_dir=cfg_dir, recover=False)
+        assert s.needs_recovery
+        assert "nothing was changed" in s.load_error
+        assert s.recovery_notice is None and s.preserved_path is None
+        with pytest.raises(StateError):
+            s.save()
+        assert sorted((p.name, p.read_bytes()) for p in cfg_dir.iterdir()) == before
+
+    def test_without_recovery_healthy_file_loads(self, cfg_dir):
+        from memanga.state import State
+        good = {"manga": {"Berserk": {"downloaded": ["1"]}}}
+        (cfg_dir / "state.json").write_text(json.dumps(good))
+        s = State(config_dir=cfg_dir, recover=False)
+        assert not s.needs_recovery and s.load_error is None
+        assert s.get_downloaded_chapters("Berserk") == ["1"]
+
     def test_invalid_backup_falls_back_to_defaults(self, cfg_dir):
         from memanga.state import State
         (cfg_dir / "state.json.bak").write_text("[1, 2]")

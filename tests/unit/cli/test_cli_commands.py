@@ -5729,3 +5729,378 @@ class TestPathOpen:
         out = capsys.readouterr().out
         assert "Print the download folder of a manga" in out
         assert "Open the download folder of a manga" in out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Issue #244 — one state-changing process per config directory
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestConfigDirLock:
+    BUSY = "another MeManga process is using"
+
+    @pytest.fixture
+    def root(self, isolated_home):
+        from memanga.config import Config
+        from memanga.state import State
+        root = isolated_home / ".config" / "memanga"
+        cfg = Config(root)
+        cfg.set("manga", [{"title": "Berserk", "source": "mangadex.org",
+                           "url": "https://mangadex.org/t/1",
+                           "status": "reading"}])
+        cfg.save()
+        st = State(root)
+        st.add_failed_chapter("Berserk", "1", "mangadex.org", "timeout")
+        st.save()
+        return root
+
+    @staticmethod
+    def _files(root):
+        return {name: (root / name).read_bytes()
+                for name in ("config.yaml", "state.json")}
+
+    @pytest.mark.parametrize("argv", [
+        ("failed", "clear"),
+        ("failed", "--retry"),
+        ("check", "--dry-run"),
+        ("rm", "Berserk", "--keep-files"),
+        ("import", "-"),
+        ("config", "set", "partial_chapters.enabled", "true"),
+        ("cron", "install", "--time", "07:00"),
+        ("tui",),
+    ])
+    def test_state_changing_command_refused_while_locked(
+            self, run_cli, root, lock_holder, capsys, argv):
+        before = self._files(root)
+        lock_holder.hold(root)
+        capsys.readouterr()
+        assert run_cli(*argv) == 1
+        captured = capsys.readouterr()
+        assert self.BUSY in captured.err
+        assert str(root) in captured.err
+        assert captured.out == ""
+        assert self._files(root) == before
+
+    @pytest.mark.parametrize("argv", [
+        ("list",),
+        ("status",),
+        ("failed",),
+        ("failed", "list"),
+        ("config", "show"),
+        ("config", "path"),
+        ("config", "--show"),
+        ("export", "-"),
+        ("sources",),
+    ])
+    def test_read_only_command_runs_while_locked(
+            self, run_cli, root, lock_holder, capsys, argv):
+        lock_holder.hold(root)
+        capsys.readouterr()
+        assert run_cli(*argv) == 0
+        assert self.BUSY not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("argv, locked", [
+        (["search", "x", "--json"], False),
+        (["search", "x", "--json", "--add", "1"], True),
+        (["search", "x"], True),
+        (["cron", "status"], False),
+        (["cron", "remove"], True),
+        (["config"], True),
+        (["config", "email"], True),
+        (["config", "edit"], True),
+        (["import", "-", "--dry-run"], True),
+        (["read", "Berserk", "1"], True),
+        (["--gui"], True),
+        ([], True),
+    ])
+    def test_which_commands_lock(self, argv, locked):
+        from memanga import cli
+        args = cli.build_parser().parse_args(argv)
+        assert cli._needs_config_lock(args) is locked
+
+    def test_runs_again_once_holder_exits(self, run_cli, root, lock_holder,
+                                          capsys):
+        proc = lock_holder.hold(root)
+        assert run_cli("failed", "clear") == 1
+        lock_holder.release(proc)
+        assert run_cli("failed", "clear") == 0
+        from memanga.state import State
+        assert State(root).get_all_failed_chapters() == {}
+
+    def test_command_holds_lock_and_releases_it(self, run_cli, root,
+                                                lock_holder, monkeypatch):
+        from memanga import cli
+        seen = []
+        monkeypatch.setattr(cli, "cmd_check",
+                            lambda args: seen.append(lock_holder.can_lock(root)))
+        assert run_cli("check") == 0
+        assert seen == [False]
+        assert lock_holder.can_lock(root)
+
+    def test_interrupt_saves_state_before_releasing(self, run_cli, root,
+                                                    lock_holder, monkeypatch):
+        from memanga import cli
+
+        def _interrupt(args):
+            raise KeyboardInterrupt
+        seen = []
+        monkeypatch.setattr(cli, "cmd_check", _interrupt)
+        monkeypatch.setattr(cli, "_flush_state_on_interrupt",
+                            lambda: seen.append(lock_holder.can_lock(root)))
+        assert run_cli("check") == 130
+        assert seen == [False]
+        assert lock_holder.can_lock(root)
+
+    def test_env_config_dir_is_locked(self, monkeypatch, tmp_path, lock_holder,
+                                      isolated_home, capsys):
+        from memanga import cli
+        other = tmp_path / "other"
+        monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(other))
+        lock_holder.hold(other)
+        monkeypatch.setattr(sys, "argv", ["memanga", "failed", "clear"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert self.BUSY in capsys.readouterr().err
+
+    def test_gui_holds_lock_for_its_window(self, monkeypatch, root, lock_holder):
+        monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["memanga", "--gui"])
+        from memanga import cli
+        seen = []
+        fake_gui = types.SimpleNamespace(
+            launch_gui=lambda **kwargs: seen.append(lock_holder.can_lock(root)))
+        monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
+        cli.main()
+        assert seen == [False]
+
+    def test_gui_refused_while_locked(self, monkeypatch, root, lock_holder,
+                                      capsys):
+        monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["memanga", "--gui"])
+        from memanga import cli
+        launched = []
+        fake_gui = types.SimpleNamespace(
+            launch_gui=lambda **kwargs: launched.append(kwargs))
+        monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
+        lock_holder.hold(root)
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        assert launched == []
+        assert self.BUSY in capsys.readouterr().err
+
+    @staticmethod
+    def _damage(root):
+        good = (root / "state.json").read_text(encoding="utf-8")
+        (root / "state.json.bak").write_text(good, encoding="utf-8")
+        (root / "state.json").write_text("{truncated", encoding="utf-8")
+
+    @staticmethod
+    def _dir_files(root):
+        return sorted((p.name, p.read_bytes()) for p in root.iterdir()
+                      if p.is_file())
+
+    @pytest.mark.parametrize("argv", [
+        ("list",), ("status",), ("failed",), ("export", "-"),
+        ("doctor", "--check", "state"),
+    ])
+    def test_damaged_state_untouched_while_locked(
+            self, run_cli, root, lock_holder, capsys, argv):
+        self._damage(root)
+        lock_holder.hold(root)  # creates memanga.lock
+        before = self._dir_files(root)
+        capsys.readouterr()
+        assert run_cli(*argv) == 1
+        captured = capsys.readouterr()
+        assert "nothing was changed" in " ".join(
+            (captured.err + captured.out).split())
+        assert self._dir_files(root) == before
+        assert not list(root.glob("state.json.corrupt-*"))
+
+    def test_damaged_state_recovered_once_lock_is_free(
+            self, run_cli, root, lock_holder, capsys, monkeypatch):
+        from memanga import cli
+        from memanga.state import State
+        self._damage(root)
+        backup = json.loads((root / "state.json.bak").read_text(encoding="utf-8"))
+        proc = lock_holder.hold(root)
+        assert run_cli("list") == 1
+        lock_holder.release(proc)
+
+        seen = []
+        real_list = cli.cmd_list
+        monkeypatch.setattr(cli, "cmd_list", lambda args: (
+            seen.append(lock_holder.can_lock(root)), real_list(args))[1])
+        capsys.readouterr()
+        assert run_cli("list") == 0
+        assert seen == [False]  # recovery holds the lock for the command
+        assert "Restored the previous copy" in capsys.readouterr().err
+        assert json.loads((root / "state.json").read_text(encoding="utf-8")) == backup
+        assert [p.read_text(encoding="utf-8")
+                for p in root.glob("state.json.corrupt-*")] == ["{truncated"]
+        assert State(root).get_failed_chapters("Berserk")
+        assert lock_holder.can_lock(root)
+
+    def test_healthy_read_only_command_does_not_take_lock(
+            self, run_cli, root, lock_holder, monkeypatch):
+        from memanga import cli
+        seen = []
+        monkeypatch.setattr(cli, "cmd_list",
+                            lambda args: seen.append(lock_holder.can_lock(root)))
+        assert run_cli("list") == 0
+        assert seen == [True]
+
+    @pytest.mark.parametrize("name", [
+        "state.json", "config.yaml", "memanga.lock", "state.json.bak",
+        "config.yaml.bak", "STATE.JSON", "state.json.corrupt-x",
+    ])
+    def test_export_refuses_own_files(self, run_cli, root, lock_holder,
+                                      capsys, name):
+        lock_holder.hold(root)
+        before = self._dir_files(root)
+        capsys.readouterr()
+        assert run_cli("export", str(root / name)) == 1
+        assert "own files" in " ".join(capsys.readouterr().err.split())
+        assert self._dir_files(root) == before
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    @pytest.mark.parametrize("alias", ["file", "dangling", "dir"])
+    def test_export_refuses_symlink_aliases(self, run_cli, root, lock_holder,
+                                            tmp_path, capsys, alias):
+        if alias == "file":
+            target = tmp_path / "out.json"
+            target.symlink_to(root / "state.json")
+        elif alias == "dangling":
+            target = tmp_path / "out.json"
+            target.symlink_to(root / "state.json.bak")
+        else:
+            (tmp_path / "cfg-alias").symlink_to(root, target_is_directory=True)
+            target = tmp_path / "cfg-alias" / "config.yaml"
+        lock_holder.hold(root)
+        before = self._dir_files(root)
+        assert run_cli("export", str(target)) == 1
+        assert "own files" in " ".join(capsys.readouterr().err.split())
+        assert self._dir_files(root) == before
+
+    def test_export_refuses_hard_link_to_state(self, run_cli, root, tmp_path,
+                                               lock_holder, capsys):
+        target = tmp_path / "out.json"
+        try:
+            os.link(root / "state.json", target)
+        except OSError as e:
+            pytest.skip(f"hard links not supported: {e}")
+        lock_holder.hold(root)
+        before = (root / "state.json").read_bytes()
+        assert run_cli("export", str(target)) == 1
+        assert "own files" in " ".join(capsys.readouterr().err.split())
+        assert (root / "state.json").read_bytes() == before
+
+    @pytest.mark.parametrize("name", [
+        "state.json.bak", "config.yaml.bak",
+        "state.json.corrupt-20261019T120000-0123456789abcdef",
+    ])
+    def test_export_refuses_hard_link_to_backup_or_recovery_copy(
+            self, run_cli, root, tmp_path, lock_holder, capsys, name):
+        protected = root / name
+        protected.write_text('{"manga": {}}', encoding="utf-8")
+        target = tmp_path / "out.json"
+        try:
+            os.link(protected, target)
+        except OSError as e:
+            pytest.skip(f"hard links not supported: {e}")
+        lock_holder.hold(root)
+        before = self._dir_files(root)
+        assert run_cli("export", str(target)) == 1
+        assert "own files" in " ".join(capsys.readouterr().err.split())
+        assert self._dir_files(root) == before
+        assert target.read_bytes() == protected.read_bytes() == b'{"manga": {}}'
+
+    @staticmethod
+    def _during_export_check(monkeypatch, name, replacement):
+        """Replace os.<name> only while export checks its destination."""
+        from memanga import cli
+        real_check = cli._own_file_target
+
+        def _check(path):
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(os, name, replacement)
+                return real_check(path)
+        monkeypatch.setattr(cli, "_own_file_target", _check)
+
+    @pytest.mark.parametrize("failure", ["scandir", "target_ino", "own_stat"])
+    def test_export_refuses_existing_file_it_cannot_verify(
+            self, run_cli, root, tmp_path, monkeypatch, capsys, failure):
+        """Fail closed: an existing destination whose identity can't be
+        compared with every own file may be a hard link to a backup."""
+        target = tmp_path / "existing.json"
+        target.write_text("old", encoding="utf-8")
+        real_stat = os.stat
+
+        if failure == "scandir":
+            def _scandir(path):
+                raise PermissionError(13, "Permission denied")
+            self._during_export_check(monkeypatch, "scandir", _scandir)
+        elif failure == "target_ino":
+            def _stat(path, *a, **k):
+                st = real_stat(path, *a, **k)
+                if os.fspath(path) == os.path.realpath(target):
+                    return os.stat_result((st.st_mode, 0) + tuple(st)[2:])
+                return st
+            self._during_export_check(monkeypatch, "stat", _stat)
+        else:
+            def _stat(path, *a, **k):
+                if os.path.basename(os.fspath(path)) == "state.json":
+                    raise PermissionError(13, "Permission denied")
+                return real_stat(path, *a, **k)
+            self._during_export_check(monkeypatch, "stat", _stat)
+
+        before = self._dir_files(root)
+        capsys.readouterr()
+        assert run_cli("export", str(target)) == 1
+        err = " ".join(capsys.readouterr().err.split())
+        assert "could not make sure" in err
+        assert "Nothing was written" in err
+        assert target.read_text(encoding="utf-8") == "old"
+        assert self._dir_files(root) == before
+
+    def test_export_to_new_file_needs_no_identity_check(
+            self, run_cli, root, tmp_path, monkeypatch):
+        def _scandir(path):
+            raise PermissionError(13, "Permission denied")
+        self._during_export_check(monkeypatch, "scandir", _scandir)
+        target = tmp_path / "new.json"
+        assert run_cli("export", str(target)) == 0
+        assert json.loads(target.read_text(encoding="utf-8"))["manga"]
+
+    def test_export_over_unrelated_existing_file_works(self, run_cli, root,
+                                                       tmp_path, lock_holder):
+        target = tmp_path / "old-export.json"
+        target.write_text("old", encoding="utf-8")
+        lock_holder.hold(root)
+        before = self._dir_files(root)
+        assert run_cli("export", str(target)) == 0
+        assert json.loads(target.read_text(encoding="utf-8"))["manga"]
+        assert self._dir_files(root) == before
+
+    def test_export_to_other_file_in_config_dir_works(self, run_cli, root,
+                                                      lock_holder):
+        lock_holder.hold(root)
+        assert run_cli("export", str(root / "backup.json")) == 0
+        assert json.loads((root / "backup.json").read_text())["manga"]
+
+    def test_lock_failure_is_reported_and_nothing_runs(
+            self, run_cli, root, monkeypatch, capsys):
+        import errno
+        from memanga import cli, process_lock
+
+        def _unsupported(fd):
+            raise OSError(errno.ENOLCK, "No locks available")
+        monkeypatch.setattr(process_lock, "_lock_fd", _unsupported)
+        before = self._files(root)
+        assert run_cli("failed", "clear") == 1
+        err = capsys.readouterr().err
+        assert "cannot lock" in err
+        assert "No locks available" in err
+        assert self._files(root) == before
+        assert cli._config_lock is None

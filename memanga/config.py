@@ -10,6 +10,11 @@ from .perf import timed
 from .persist import atomic_write_text
 
 
+def default_config_dir() -> Path:
+    """Config root used when none is selected: ~/.config/memanga."""
+    return Path.home() / ".config" / "memanga"
+
+
 class ConfigError(Exception):
     """The config file exists but cannot be loaded."""
 
@@ -33,7 +38,7 @@ class Config:
         if config_dir:
             self.config_dir = Path(config_dir)
         else:
-            self.config_dir = Path.home() / ".config" / "memanga"
+            self.config_dir = default_config_dir()
 
         self.config_path = self.config_dir / "config.yaml"
         self.config_dir.mkdir(parents=True, exist_ok=True)

@@ -67,7 +67,7 @@ class State:
     # sluggish.
     SLOW_LATENCY_MS = 2500
 
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir: Optional[Path] = None, recover: bool = True):
         if config_dir:
             self.config_dir = Path(config_dir)
         else:
@@ -88,6 +88,12 @@ class State:
         # user where it went and what was loaded instead.
         self.recovery_notice: Optional[str] = None
         self.preserved_path: Optional[Path] = None
+        # Issue #244: with ``recover=False`` (a read-only command that does
+        # not hold the config directory lock) a damaged state.json is not
+        # copied aside, removed or restored; ``needs_recovery`` is set and
+        # loading fails instead, so nothing in the directory is changed.
+        self._recover = recover
+        self.needs_recovery = False
         self._data, restored = self._load()
         if restored:
             self._write_back_restored()
@@ -147,6 +153,14 @@ class State:
             return self._default_state(), False
         except ValueError as e:
             problem = f"{path} is damaged ({e})"
+        if not self._recover:
+            self.needs_recovery = True
+            self.load_error = (
+                f"{problem}. It is only repaired while no other MeManga "
+                f"process is using {self.config_dir}; nothing was changed. "
+                "Retry when that process has finished."
+            )
+            return self._default_state(), False
         try:
             self.preserved_path = preserve_corrupt(path)
         except OSError as e:
