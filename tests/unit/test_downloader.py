@@ -109,6 +109,109 @@ class TestCheckForUpdates:
         new = check_for_updates(manga, state, from_chapter=3)
         assert all(float(c.number) >= 3 for c in new)
 
+    @staticmethod
+    def _set_mock_chapters(scraper, numbers):
+        from memanga.scrapers.base import Chapter
+        scraper._chapters = [
+            Chapter(number=n, url=f"https://mock.test/c/{i}")
+            for i, n in enumerate(numbers)
+        ]
+
+    @pytest.mark.parametrize("label, catalogue, expected", [
+        ("10 Part 1", ["9", "10", "10 Part 1", "11", "12"], ["11", "12"]),
+        ("Chapter 5", ["4", "5", "Chapter 5", "6", "7"], ["6", "7"]),
+    ])
+    def test_labelled_last_chapter_uses_embedded_number(
+            self, state, patch_get_scraper, label, catalogue, expected):
+        # Issue #228: a labelled last chapter used to raise ValueError.
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper, catalogue)
+        state.add_downloaded_chapter("Mock", label)
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state)
+        assert [c.number for c in new] == expected
+
+    def test_non_numeric_last_chapter_falls_back_to_zero(
+            self, state, patch_get_scraper):
+        # Issue #228: "Extra" has no number, so it is treated like an empty
+        # last chapter; downloaded chapters are still skipped.
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper, ["1", "2", "Extra", "3"])
+        state.add_downloaded_chapter("Mock", "1")
+        state.add_downloaded_chapter("Mock", "Extra")
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state)
+        assert [c.number for c in new] == ["2", "3"]
+
+    @pytest.mark.parametrize("stored, expected", [
+        ("4.999", ["5", "6"]),
+        ("-0.001", ["0", "1", "2", "3", "4", "5", "6"]),
+    ])
+    def test_numeric_last_chapter_keeps_float_parsing(
+            self, state, patch_get_scraper, stored, expected):
+        # Values written by "download from chapter X" keep their exact
+        # value, including the sign of the chapter-0 reset.
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper, [str(i) for i in range(7)])
+        state.set_last_chapter("Mock", stored)
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state)
+        assert [c.number for c in new] == expected
+
+    @pytest.mark.parametrize("label, expected_backlog", [
+        ("5", [str(i) for i in range(6, 11)]),
+        ("Extra", [str(i) for i in range(1, 11)]),
+    ])
+    def test_last_chapter_label_cannot_bypass_suspicion_guard(
+            self, state, patch_get_scraper, label, expected_backlog):
+        # Issue #228: a digit-free label parses to 0.0 but must still score
+        # a beyond-baseline batch exactly like a numeric last chapter.
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper,
+                                [str(i) for i in range(1, 61)])
+        state.add_downloaded_chapter("Mock", label)
+        state.set_catalogue_baseline("Mock", 10.0)
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state)
+        assert [c.number for c in new] == expected_backlog
+        record = state.get_suspicious_batch("Mock")
+        assert record is not None
+        assert record["chapters"] == [str(i) for i in range(11, 61)]
+        assert record["last_chapter"] == 10.0
+        assert state.get_catalogue_baseline("Mock") == 10.0
+
+    def test_empty_last_chapter_with_baseline_is_not_scored(
+            self, state, patch_get_scraper):
+        # A truly empty last chapter (fresh or "download all" reset) keeps
+        # returning the whole catalogue unscored.
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper,
+                                [str(i) for i in range(1, 61)])
+        state.set_catalogue_baseline("Mock", 10.0)
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state)
+        assert len(new) == 60
+        assert state.get_suspicious_batch("Mock") is None
+        assert state.get_catalogue_baseline("Mock") == 60.0
+
+    def test_from_chapter_still_bypasses_guard_with_label(
+            self, state, patch_get_scraper):
+        from memanga.downloader import check_for_updates
+        self._set_mock_chapters(patch_get_scraper,
+                                [str(i) for i in range(1, 61)])
+        state.add_downloaded_chapter("Mock", "Extra")
+        state.set_catalogue_baseline("Mock", 10.0)
+        manga = {"title": "Mock", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        new = check_for_updates(manga, state, from_chapter=1)
+        assert len(new) == 60
+        assert state.get_suspicious_batch("Mock") is None
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # download_chapter — issue #23: every format under <dir>/<title>/
