@@ -902,6 +902,10 @@ class TestCheckCommand:
         assert rc == 0
         assert sent == [backup_path]
         assert cli.state.is_chapter_downloaded("Vinland Saga", "71")
+        [entry] = cli.state.get_download_history()
+        assert (entry["chapter"], entry["source"]) == ("71", "backup.test")
+        assert entry["from_backup"] and entry["kindle_sent"]
+        assert not entry["partial"]
 
     def test_backup_partial_in_email_mode_sends_and_warns(
             self, run_cli, config, monkeypatch, tmp_path):
@@ -965,6 +969,9 @@ class TestCheckCommand:
         assert cli.state.get_partial_chapter("Vinland Saga", "71")["failed_pages"] == [7]
         notifications = cli.state.get("notifications", [])
         assert any("saved as partial" in n["message"] for n in notifications)
+        [entry] = cli.state.get_download_history()
+        assert entry["source"] == "backup.test"
+        assert entry["from_backup"] and entry["partial"]
 
     def test_over_threshold_backup_failure_records_failure_not_downloaded(
             self, run_cli, config, monkeypatch):
@@ -1009,6 +1016,52 @@ class TestCheckCommand:
         assert not cli.state.is_chapter_downloaded("Vinland Saga", "71")
         failed = cli.state.get_failed_chapters("Vinland Saga")
         assert "71" in failed
+        assert cli.state.get_download_history() == []
+
+    def test_check_download_records_history_the_guard_learns_from(
+            self, run_cli, config, monkeypatch, tmp_path):
+        """Issue #240: CLI downloads are logged to the download history,
+        so the suspicious-batch guard learns this manga's batch size."""
+        from memanga import cli
+        from memanga.suspicion import estimate_typical_batch_size
+
+        config.set("delivery.output_format", "cbz")
+        config.set("manga", [{
+            "title": "Vinland Saga",
+            "status": "reading",
+            "source": "primary.test",
+            "url": "https://primary.test/vs",
+        }])
+        config.save()
+
+        chapters = [
+            types.SimpleNamespace(
+                number=n, title="", url=f"https://primary.test/c/{n}",
+                source="primary.test", is_backup=False)
+            for n in ("71", "72")
+        ]
+
+        def fake_download(manga, chapter, output_dir, output_format, **kwargs):
+            path = tmp_path / f"{chapter.number}.{output_format}"
+            path.write_bytes(b"PK")
+            return path
+
+        monkeypatch.setattr(cli, "check_for_updates", lambda *a, **k: chapters)
+        monkeypatch.setattr(cli, "download_chapter", fake_download)
+
+        rc = run_cli("check", "--auto", "--quiet")
+
+        assert rc == 0
+        history = cli.state.get_download_history()
+        assert [(h["title"], h["chapter"]) for h in history] == [
+            ("Vinland Saga", "72"), ("Vinland Saga", "71")]
+        for entry in history:
+            assert entry["format"] == "cbz"
+            assert entry["path"] == str(tmp_path / f"{entry['chapter']}.cbz")
+            assert entry["source"] == "primary.test"
+            assert not (entry["from_backup"] or entry["partial"]
+                        or entry["kindle_sent"])
+        assert estimate_typical_batch_size(cli.state, "Vinland Saga") == 2.0
 
     def test_failed_retry_includes_accepted_partials(
             self, run_cli, config, state, monkeypatch, tmp_path):

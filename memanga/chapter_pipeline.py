@@ -3,7 +3,8 @@
 ``check``, ``failed retry`` and GUI downloads all run every chapter
 through :class:`ChapterPipeline` (issues #222, #295), so backup recovery,
 partial-chapter salvage (issue #86), Kindle delivery, delete-after-send,
-failure records and state cleanup cannot drift between them.
+failure records, download history (issue #240) and state cleanup cannot
+drift between them.
 
 The pipeline makes the decisions and writes state; it prints nothing.
 Progress goes to a :class:`ChapterReporter` while a chapter is processed
@@ -145,6 +146,22 @@ class ChapterReporter:
 
 def _no_app_password() -> Optional[str]:
     return None
+
+
+def _size_mb(path: Optional[Path]) -> float:
+    """Size of a saved chapter in MiB: the file, or every file in an image
+    folder. 0 when there is no path or it cannot be read; the chapter is
+    saved regardless."""
+    if path is None:
+        return 0.0
+    try:
+        if path.is_dir():
+            size = sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+        else:
+            size = path.stat().st_size
+    except OSError:
+        return 0.0
+    return size / (1024 * 1024)
 
 
 @dataclass
@@ -337,11 +354,23 @@ class ChapterPipeline:
             self.state.clear_partial_chapter(title, chapter.number)
         self.reporter.saved(outcome)
 
+        # Measured before delivery, which may delete the local copy.
+        size_mb = _size_mb(path)
         # Delivery runs before the chapter is marked downloaded (#86).
         outcome = replace(outcome, delivery=self._deliver(path))
         self.state.add_downloaded_chapter(title, chapter.number)
         self.state.clear_pending_backup(title, chapter.number)
         self.state.clear_failed_chapter(title, chapter.number)
+        # The suspicious-batch guard learns batch sizes from this (#240).
+        self.state.add_download_history(
+            title, chapter.number, self.options.output_format,
+            path="" if path is None else str(path),
+            size_mb=size_mb,
+            kindle_sent=outcome.delivery is DeliveryStatus.SENT,
+            source=source,
+            from_backup=from_backup,
+            partial=outcome.status is ChapterStatus.PARTIAL,
+        )
         return outcome
 
     def _deliver(self, path: Path) -> DeliveryStatus:

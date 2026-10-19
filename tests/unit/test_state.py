@@ -734,6 +734,20 @@ class TestDownloadHistory:
             state.add_download_history("X", str(i), "pdf", "", 0.1)
         assert len(state._data["download_history"]) <= 200
 
+    def test_source_and_flags_default_for_old_callers(self, state):
+        state.add_download_history("X", "1", "pdf", "/tmp/x.pdf", 1.0, True)
+        entry = state.get_download_history()[0]
+        assert entry["kindle_sent"] is True
+        assert (entry["source"], entry["from_backup"], entry["partial"]) == \
+            (None, False, False)
+
+    def test_source_and_flags_are_stored(self, state):
+        state.add_download_history("X", "1", "pdf", source="backup.test",
+                                   from_backup=True, partial=True)
+        entry = state.get_download_history()[0]
+        assert (entry["source"], entry["from_backup"], entry["partial"]) == \
+            ("backup.test", True, True)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Stats helpers used by Library + Downloads

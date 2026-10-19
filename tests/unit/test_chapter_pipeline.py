@@ -494,3 +494,159 @@ class TestDeleteFailure:
             ("email_sent",), ("delete_failed", "in use"),
         ]
         assert state.is_chapter_downloaded(TITLE, "71")
+
+
+class TestDownloadHistory:
+    """Every saved chapter is logged to the download history, which the
+    suspicious-batch guard learns batch sizes from (issue #240)."""
+
+    def _entry(self, state):
+        history = state.get_download_history()
+        assert len(history) == 1
+        return history[0]
+
+    def test_primary_complete_is_logged(self, state, tmp_path):
+        path = tmp_path / "chapter.pdf"
+        path.write_bytes(b"0" * (512 * 1024))
+        downloads = _Downloads({("primary.test", False): path})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        pipeline.process(SINGLE, _primary())
+
+        entry = self._entry(state)
+        assert (entry["title"], entry["chapter"], entry["format"]) == (TITLE, "71", "pdf")
+        assert entry["path"] == str(path)
+        assert entry["size_mb"] == 0.5
+        assert entry["source"] == "primary.test"
+        assert not entry["from_backup"]
+        assert not entry["partial"]
+        assert not entry["kindle_sent"]
+        assert entry["timestamp"]
+
+    def test_backup_complete_sent_and_deleted_keeps_measured_size(
+            self, state, tmp_path):
+        path = tmp_path / "chapter.pdf"
+        path.write_bytes(b"0" * (512 * 1024))
+        downloads = _Downloads({
+            ("primary.test", False): DownloaderError("primary broke"),
+            ("backup.test", False): path,
+        })
+        pipeline = _pipeline(state, tmp_path, downloads, backup=_backup(),
+                             sent=[], delivery_mode="email", email=EMAIL,
+                             delete_after_send=True)
+
+        pipeline.process(WITH_BACKUP, _primary())
+
+        assert not path.exists()
+        entry = self._entry(state)
+        assert entry["source"] == "backup.test"
+        assert entry["from_backup"]
+        assert not entry["partial"]
+        assert entry["kindle_sent"]
+        assert entry["size_mb"] == 0.5
+
+    def test_failed_delivery_is_not_marked_sent(self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads,
+                             sent=EmailError("SMTP down"),
+                             delivery_mode="email", email=EMAIL)
+
+        pipeline.process(SINGLE, _primary())
+
+        assert not self._entry(state)["kindle_sent"]
+
+    def test_backup_partial_is_logged_as_partial(self, state, tmp_path, pdf):
+        downloads = _Downloads({
+            ("primary.test", False): DownloaderError("primary incomplete"),
+            ("backup.test", False): DownloaderError("backup incomplete"),
+            ("backup.test", True): ("partial", pdf, [7], 40),
+        })
+        pipeline = _pipeline(state, tmp_path, downloads, backup=_backup(),
+                             allow_partial=True, partial_threshold=10)
+
+        pipeline.process(WITH_BACKUP, _primary())
+
+        entry = self._entry(state)
+        assert entry["source"] == "backup.test"
+        assert entry["from_backup"]
+        assert entry["partial"]
+
+    def test_primary_partial_is_logged_as_partial(self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", True): ("partial", pdf, [7], 40)})
+        pipeline = _pipeline(state, tmp_path, downloads,
+                             allow_partial=True, partial_threshold=10)
+
+        pipeline.process(SINGLE, _primary())
+
+        entry = self._entry(state)
+        assert entry["source"] == "primary.test"
+        assert not entry["from_backup"]
+        assert entry["partial"]
+
+    def test_image_folder_size_counts_its_files(self, state, tmp_path):
+        folder = tmp_path / "Chapter 71"
+        folder.mkdir()
+        (folder / "001.jpg").write_bytes(b"0" * (256 * 1024))
+        (folder / "002.jpg").write_bytes(b"0" * (256 * 1024))
+        downloads = _Downloads({("primary.test", False): folder})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        pipeline.process(SINGLE, _primary())
+
+        assert self._entry(state)["size_mb"] == 0.5
+
+    def test_missing_output_is_logged_with_zero_size(self, state, tmp_path):
+        downloads = _Downloads({("primary.test", False): tmp_path / "gone.pdf"})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        pipeline.process(SINGLE, _primary())
+
+        assert self._entry(state)["size_mb"] == 0
+
+    def test_saved_without_a_path_is_logged_without_one(self, state, tmp_path):
+        # A download collaborator may report success without a location
+        # (the GUI worker tests do); the chapter still counts as saved.
+        downloads = _Downloads({("primary.test", False): None})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        outcome = pipeline.process(SINGLE, _primary())
+
+        assert outcome.saved
+        assert outcome.path is None
+        assert state.is_chapter_downloaded(TITLE, "71")
+        entry = self._entry(state)
+        assert (entry["path"], entry["size_mb"]) == ("", 0)
+
+    def test_failure_is_not_logged(self, state, tmp_path):
+        downloads = _Downloads({
+            ("primary.test", False): DownloaderError("primary broke"),
+            ("backup.test", False): DownloaderError("backup broke"),
+        })
+        pipeline = _pipeline(state, tmp_path, downloads, backup=_backup())
+
+        pipeline.process(WITH_BACKUP, _primary())
+
+        assert state.get_download_history() == []
+
+    def test_cancel_during_send_is_not_logged(self, state, tmp_path, pdf):
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads,
+                             sent=InterruptedError("cancelled"),
+                             delivery_mode="email", email=EMAIL)
+
+        with pytest.raises(InterruptedError):
+            pipeline.process(SINGLE, _primary())
+        assert state.get_download_history() == []
+
+    def test_history_stays_capped(self, state, tmp_path, pdf):
+        for i in range(195):
+            state.add_download_history("Other", str(i), "pdf")
+        downloads = _Downloads({("primary.test", False): pdf})
+        pipeline = _pipeline(state, tmp_path, downloads)
+
+        for number in range(1, 11):
+            pipeline.process(SINGLE, _primary(str(number)))
+
+        history = state.get_download_history(limit=1000)
+        assert len(history) == 200
+        assert history[0]["chapter"] == "10"
