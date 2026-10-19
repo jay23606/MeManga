@@ -47,9 +47,11 @@ class TestStateLifecycle:
         d = isolated_home / ".config" / "memanga"
         d.mkdir(parents=True, exist_ok=True)
         (d / "state.json").write_text("{this is not json")
-        # Should not raise — falls back to defaults.
+        # Should not raise — falls back to defaults, and the damaged file
+        # is kept for recovery (issue #243).
         s = State(config_dir=d)
         assert s.get_notifications() == []
+        assert s.preserved_path.read_text() == "{this is not json"
 
     def test_get_set_arbitrary_key(self, state):
         state.set("custom_key", {"a": 1})

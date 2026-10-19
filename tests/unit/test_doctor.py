@@ -183,6 +183,41 @@ class TestLocalPathChecks:
         assert result.status == doctor.FAIL
         assert "JSON" in result.message
 
+    def test_state_recovered_on_load_warns(self, config, isolated_home):
+        from memanga.state import State
+        cfg_dir = isolated_home / ".config" / "memanga"
+        (cfg_dir / "state.json").write_text("{not json", encoding="utf-8")
+        state = State(config_dir=cfg_dir)
+        result = doctor.check_state(config, state)
+        assert result.status == doctor.WARNING
+        assert result.details["preserved_copy"] == str(state.preserved_path)
+        assert "kept as" in result.message
+
+    def test_failed_restore_reports_load_error_first(
+            self, config, isolated_home, monkeypatch):
+        """The damaged file is still in place after a failed restore;
+        doctor reports State's own message, not a generic JSON error."""
+        import os
+        from memanga.state import State
+        cfg_dir = isolated_home / ".config" / "memanga"
+        (cfg_dir / "state.json.bak").write_text('{"manga": {}}', encoding="utf-8")
+        (cfg_dir / "state.json").write_text("{not json", encoding="utf-8")
+        real_replace = os.replace
+
+        def replace(src, dst):
+            if str(dst) == str(cfg_dir / "state.json"):
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst)
+        monkeypatch.setattr("memanga.persist.os.replace", replace)
+        state = State(config_dir=cfg_dir)
+
+        result = doctor.check_state(config, state)
+        assert result.status == doctor.FAIL
+        assert result.message.startswith("State file could not be loaded:")
+        assert "could not be written back" in result.message
+        assert "not valid JSON" not in result.message
+        assert (cfg_dir / "state.json").read_text(encoding="utf-8") == "{not json"
+
     def test_download_path_that_is_a_file_fails(self, config, tmp_path):
         target = tmp_path / "not-a-dir"
         target.write_text("x")

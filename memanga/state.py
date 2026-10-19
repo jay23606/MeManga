@@ -6,7 +6,6 @@ import copy
 import json
 import os
 import re
-import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +14,11 @@ from typing import List, Optional, Dict, Any, Mapping
 
 from .backup import merge_backup_state
 from .perf import timed
+from .persist import atomic_write_text, preserve_corrupt
+
+
+class StateError(Exception):
+    """The state file exists but could not be loaded or kept safe."""
 
 
 _CHAPTER_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)")
@@ -70,22 +74,115 @@ class State:
             self.config_dir = Path.home() / ".config" / "memanga"
 
         self.state_path = self.config_dir / "state.json"
+        self.backup_path = self.config_dir / "state.json.bak"
         self.config_dir.mkdir(parents=True, exist_ok=True)
         # Reentrant so mutators that persist immediately can call save()
         # (and nested public getters) while already holding the lock.
         self._lock = threading.RLock()
         self._dirty = False
-        self._data = self._load()
+        # Issue #243: set when state.json exists but cannot be loaded and
+        # could not be copied aside or restored; save() then refuses to write so the
+        # only copy is never replaced.
+        self.load_error: Optional[str] = None
+        # Set when a damaged state.json was copied aside on load; tells the
+        # user where it went and what was loaded instead.
+        self.recovery_notice: Optional[str] = None
+        self.preserved_path: Optional[Path] = None
+        self._data, restored = self._load()
+        if restored:
+            self._write_back_restored()
 
-    def _load(self) -> Dict[str, Any]:
-        """Load state from file."""
-        if self.state_path.exists():
+    def _write_back_restored(self):
+        """Replace the damaged state.json with the copy restored from
+        state.json.bak.
+
+        The damaged file stays in place until this write succeeds, so a
+        start never finds state.json missing after a failed recovery (a
+        missing file is a fresh start). No backup rotation here: that
+        would turn the damaged file into the backup. If the write fails,
+        refuse to run on this state: load_error is set, saves are refused,
+        state.json stays damaged (the next start retries the restore) and
+        state.json.bak is left as it is.
+        """
+        payload = json.dumps(self._data, indent=None, default=str)
+        try:
+            atomic_write_text(self.state_path, payload)
+            return
+        except OSError as e:
+            error = e
+        self.recovery_notice = None
+        self.load_error = (
+            f"{self.state_path} is damaged and the previous copy in "
+            f"{self.backup_path} could not be written back: {error}. "
+            f"{self.state_path} was left as it is (a copy is kept as "
+            f"{self.preserved_path}), and {self.backup_path} is unchanged."
+        )
+
+    def _read_state_file(self, path: Path) -> Dict[str, Any]:
+        """Parse a state file. Raises OSError if it cannot be read and
+        ValueError if its content is not a JSON object."""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("does not contain a JSON object")
+        return data
+
+    def _load(self):
+        """Load state from file. Returns ``(data, restored_from_backup)``.
+
+        Issue #243: a damaged state.json used to be replaced by empty
+        state on the next save, losing download history, read progress
+        and source health. It is now copied aside (the copy is never
+        overwritten) and the last good copy from state.json.bak is loaded
+        when there is one; see _write_back_restored.
+        """
+        path = self.state_path
+        if not path.exists():
+            return self._default_state(), False
+        try:
+            return self._read_state_file(path), False
+        except OSError as e:
+            # Possibly temporary (permissions, I/O): keep the file in place.
+            self.load_error = f"cannot read {path}: {e}"
+            return self._default_state(), False
+        except ValueError as e:
+            problem = f"{path} is damaged ({e})"
+        try:
+            self.preserved_path = preserve_corrupt(path)
+        except OSError as e:
+            self.load_error = f"{problem}, and it could not be copied for recovery: {e}"
+            return self._default_state(), False
+
+        kept = f"{problem}. The damaged file was kept as {self.preserved_path}."
+        try:
+            data = self._read_state_file(self.backup_path)
+        except (FileNotFoundError, ValueError):
+            # Nothing to restore: drop the damaged original now that it is
+            # copied. If that fails, the next save replaces it.
             try:
-                with open(self.state_path, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                return self._default_state()
-        return self._default_state()
+                os.unlink(path)
+            except OSError:
+                pass
+            self.recovery_notice = (
+                f"{kept} No usable backup was found, so MeManga started "
+                "with empty state (download history, read progress and "
+                "source health)."
+            )
+            return self._default_state(), False
+        except OSError as e:
+            # The backup exists but cannot be read now (permissions, I/O).
+            # It may be the only good copy: refuse rather than start
+            # empty, and leave both files where they are.
+            self.load_error = (
+                f"{kept} The backup {self.backup_path} could not be read: "
+                f"{e}. {path} and the backup were left as they are."
+            )
+            return self._default_state(), False
+        self.recovery_notice = (
+            f"{kept} Restored the previous copy from {self.backup_path}; "
+            "changes made after that save may be missing."
+        )
+        return data, True
 
     def _default_state(self) -> Dict[str, Any]:
         """Return default state structure."""
@@ -139,21 +236,21 @@ class State:
 
     @timed("state.save")
     def save(self):
-        """Save state to file atomically. Thread-safe."""
+        """Save state to file atomically. Thread-safe.
+
+        The previous file is kept as state.json.bak (issue #243). Raises
+        StateError while ``load_error`` is set, so a state file that could
+        not be loaded is never overwritten.
+        """
+        if self.load_error:
+            raise StateError(
+                f"Refusing to overwrite {self.state_path}: {self.load_error}"
+            )
         with self._lock:
             data_snapshot = json.dumps(self._data, indent=None, default=str)
-            fd, tmp_path = tempfile.mkstemp(dir=self.config_dir, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(data_snapshot)
-                os.replace(tmp_path, self.state_path)
-                self._dirty = False
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            atomic_write_text(self.state_path, data_snapshot,
+                              backup_path=self.backup_path)
+            self._dirty = False
 
     def _mark_dirty(self):
         """Mark state as modified. Use flush() to write to disk."""

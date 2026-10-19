@@ -340,11 +340,38 @@ def _set_windows_app_user_model_id():
         pass
 
 
-def launch_gui():
-    """Launch the MeManga GUI application."""
-    from PySide6.QtWidgets import QApplication
+def _startup_problem(config, state):
+    """Message for a config or state file the GUI cannot run on, or None.
+
+    Issue #243: the window used to crash on a broken config.yaml, and a
+    state file that cannot be loaded must not be overwritten.
+    """
+    if config.load_error:
+        return (
+            f"MeManga could not load its config file:\n{config.config_path}"
+            f"\n\n{config.load_error}\n\n"
+            "Fix or move the file, then start MeManga again."
+        )
+    if state.load_error:
+        return (
+            f"MeManga could not load its state file:\n\n{state.load_error}"
+            "\n\nFix or move the file, then start MeManga again."
+        )
+    return None
+
+
+def launch_gui(config=None, state=None):
+    """Launch the MeManga GUI application.
+
+    ``config`` and ``state`` are the already loaded objects when the CLI
+    starts the GUI; otherwise they are loaded here.
+    """
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import QTimer
     from .app import MeMangaApp
     from . import theme as T
+    from ..config import Config
+    from ..state import State
 
     # Must run before QApplication() so the taskbar honours our icon.
     _set_windows_app_user_model_id()
@@ -365,13 +392,26 @@ def launch_gui():
     if app_icon is not None:
         qapp.setWindowIcon(app_icon)
 
+    if config is None:
+        config = Config(tolerate_errors=True)
+    if state is None:
+        state = State()
+    problem = _startup_problem(config, state)
+    if problem:
+        QMessageBox.critical(None, "MeManga", problem)
+        sys.exit(1)
+
     _ensure_browsers()
 
-    window = MeMangaApp()
+    window = MeMangaApp(config=config, app_state=state)
     # NOTE: don't subscribe `lambda: T.apply(qapp)` here.
     # `T.set_theme(name, qapp)` already calls `apply(qapp)` BEFORE
     # notifying subscribers, so a re-subscribed apply() would run a
     # full QSS+palette+polish pass twice per theme switch — the
     # noticeable freeze the user was seeing.
     window.show()
+    if state.recovery_notice:
+        notice = state.recovery_notice
+        QTimer.singleShot(
+            0, lambda: QMessageBox.warning(window, "MeManga", notice))
     sys.exit(qapp.exec())

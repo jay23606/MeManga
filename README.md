@@ -498,6 +498,8 @@ commands, scraper-add walkthroughs, and the lock-refresh flow.
 |---|---|
 | `~/.config/memanga/config.yaml` | Library, settings, source toggles, theme |
 | `~/.config/memanga/state.json` | Read/unread state, download history, source health |
+| `~/.config/memanga/*.bak` | Previous copy of `config.yaml` / `state.json`, kept on every save |
+| `~/.config/memanga/state.json.corrupt-*` | A damaged state file, kept for recovery instead of being overwritten |
 | `~/.config/memanga/covers/` | Cover image cache |
 | `~/.config/memanga/crash.log` | Uncaught exceptions from the windowed release exe |
 | `~/Downloads/MeManga/<title>/` | Default download folder (changeable in Settings) |

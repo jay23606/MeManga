@@ -120,6 +120,25 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #243 A damaged `state.json` is no longer replaced by empty state. It
+  is kept as `state.json.corrupt-<time>-<id>`, the previous copy is
+  restored from `state.json.bak` when there is one, and the CLI (on
+  stderr), the desktop app and `memanga doctor` say where the damaged
+  file went. A state file that can't be read or copied aside is never
+  overwritten: commands other than `doctor` stop with exit 1 and the
+  desktop app shows an error instead of starting. The same happens when
+  the restored copy can't be written to `state.json`, or when
+  `state.json.bak` exists but can't be read; the damaged file then stays
+  in place, so the next start tries the restore again, `state.json.bak`
+  is unchanged, and an identical damaged file is kept only once. Every
+  save keeps the previous `state.json` and `config.yaml` as `.bak` and
+  flushes the new file to disk before replacing the old one (and the
+  folder afterwards, where the system supports it); if the previous copy
+  can't be kept, the save fails and both files stay as they were. A CLI
+  command whose save fails (for example on a full disk) stops with exit
+  1 and a short message naming the file instead of a traceback. The
+  desktop app also shows an error for a broken `config.yaml` instead of
+  crashing.
 - #230 `check` and `failed retry` write `state.json` after every chapter,
   so a run that is killed, crashes or times out no longer forgets
   chapters it already saved and sent, and the next run does not download

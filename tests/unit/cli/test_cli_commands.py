@@ -3442,11 +3442,30 @@ class TestDoctorCommand:
         assert payload["checks"][0]["details"]["install_mode"] == "source"
 
     def test_failed_check_exits_1(self, run_cli, cli_state, capsys):
-        cli_state.state_path.write_text("{broken", encoding="utf-8")
+        # A state file that cannot be read stays in place and fails.
+        cli_state.state_path.mkdir()
         assert run_cli("doctor", "--json", "--check", "state") == 1
         payload = _stdout_json(capsys)
         assert payload["status"] == "fail"
         assert payload["checks"][0]["status"] == "fail"
+
+    def test_recovered_state_warns_and_fails_only_when_strict(
+            self, run_cli, cli_state, capsys):
+        # Issue #243: a damaged state.json is copied aside on load, so
+        # doctor warns about it (exit 0, or 1 with --strict).
+        path = cli_state.state_path
+        path.write_text("{broken", encoding="utf-8")
+        assert run_cli("doctor", "--json", "--check", "state") == 0
+        payload = _stdout_json(capsys)
+        assert payload["status"] == "warning"
+        check = payload["checks"][0]
+        assert check["status"] == "warning"
+        preserved = check["details"]["preserved_copy"]
+        assert open(preserved, encoding="utf-8").read() == "{broken"
+
+        path.write_text("{broken", encoding="utf-8")
+        assert run_cli("doctor", "--json", "--check", "state", "--strict") == 1
+        assert _stdout_json(capsys)["checks"][0]["status"] == "warning"
 
     def test_warning_exits_0_unless_strict(self, run_cli, config, cli_state, capsys):
         config.set("email.app_password", "secret-pw")
@@ -3526,6 +3545,159 @@ class TestInvalidConfigFile:
         assert "cannot load config file" in err
         assert "memanga doctor" in err
         assert path.read_text(encoding="utf-8") == self.BROKEN
+
+
+class TestDamagedStateFile:
+    """A damaged state.json is copied aside with a warning; one that cannot
+    be loaded, copied or restored makes commands refuse (issue #243)."""
+
+    def _root(self, home):
+        return home / ".config" / "memanga"
+
+    def test_damaged_state_is_kept_and_reported(self, run_cli, isolated_home,
+                                                capsys):
+        root = self._root(isolated_home)
+        (root / "state.json").write_text("{truncated", encoding="utf-8")
+        assert run_cli("list") == 0
+        err = capsys.readouterr().err
+        assert err.startswith("warning: ")
+        assert "kept as" in err
+        preserved = list(root.glob("state.json.corrupt-*"))
+        assert len(preserved) == 1
+        assert preserved[0].read_text(encoding="utf-8") == "{truncated"
+        # Later runs neither warn again nor touch the preserved copy.
+        assert run_cli("list") == 0
+        assert "warning" not in capsys.readouterr().err
+        assert preserved[0].read_text(encoding="utf-8") == "{truncated"
+
+    def test_damaged_state_restored_from_backup(self, run_cli, isolated_home,
+                                                capsys):
+        root = self._root(isolated_home)
+        good = {"manga": {"Berserk": {"downloaded": ["1"]}}}
+        (root / "state.json.bak").write_text(json.dumps(good), encoding="utf-8")
+        (root / "state.json").write_text("", encoding="utf-8")
+        assert run_cli("list") == 0
+        assert "Restored the previous copy" in capsys.readouterr().err
+        assert json.loads((root / "state.json").read_text(encoding="utf-8")) == good
+
+    def test_failed_restore_refuses_commands(self, run_cli, isolated_home,
+                                             monkeypatch, capsys):
+        import os
+        root = self._root(isolated_home)
+        good = json.dumps({"manga": {"Berserk": {"downloaded": ["1"]}}})
+        (root / "state.json.bak").write_text(good, encoding="utf-8")
+        (root / "state.json").write_text("{truncated", encoding="utf-8")
+        original_replace = os.replace
+
+        def replace(src, dst):
+            if str(dst) == str(root / "state.json"):
+                raise OSError("No space left on device")
+            return original_replace(src, dst)
+        monkeypatch.setattr("memanga.persist.os.replace", replace)
+        # Every run refuses while the write fails; none starts empty.
+        for _ in range(2):
+            assert run_cli("list") == 1
+            err = capsys.readouterr().err
+            assert "cannot load state file" in err
+            assert "could not be written back" in err
+            assert (root / "state.json").read_text(encoding="utf-8") == "{truncated"
+            assert (root / "state.json.bak").read_text(encoding="utf-8") == good
+
+        monkeypatch.setattr("memanga.persist.os.replace", original_replace)
+        assert run_cli("list") == 0
+        assert "Restored the previous copy" in capsys.readouterr().err
+        assert json.loads((root / "state.json").read_text(encoding="utf-8")) == \
+            json.loads(good)
+        assert (root / "state.json.bak").read_text(encoding="utf-8") == good
+
+    def test_failed_save_reports_error_without_traceback(
+            self, run_cli, isolated_home, monkeypatch, capsys):
+        import errno
+        root = self._root(isolated_home)
+        failed = {"source": "x", "error": "e", "attempts": 1}
+        current = json.dumps(
+            {"manga": {"Demo": {"failed_chapters": {"1": failed}}}})
+        old_backup = json.dumps({"manga": {"Keep": {"downloaded": ["9"]}}})
+        (root / "state.json").write_text(current, encoding="utf-8")
+        (root / "state.json.bak").write_text(old_backup, encoding="utf-8")
+
+        def no_space(*a, **k):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        monkeypatch.setattr("memanga.persist.os.link", no_space)
+        monkeypatch.setattr("memanga.persist._copy_durable", no_space)
+        capsys.readouterr()
+
+        assert run_cli("failed", "clear") == 1
+        # Rich may wrap the long line; compare with whitespace collapsed.
+        err = " ".join(capsys.readouterr().err.split())
+        assert "Could not save state.json: No space left on device" in err
+        assert "its backup were not changed by this save" in err
+        assert "Traceback" not in err
+        assert (root / "state.json").read_text(encoding="utf-8") == current
+        assert (root / "state.json.bak").read_text(encoding="utf-8") == old_backup
+        assert [p for p in root.iterdir() if p.suffix == ".tmp"] == []
+
+    def test_failed_config_save_reports_error_without_traceback(
+            self, run_cli, isolated_home, monkeypatch, capsys):
+        import errno
+        root = self._root(isolated_home)
+        assert run_cli("config", "set", "delivery.mode", "local") == 0
+        config_path = root / "config.yaml"
+        before = config_path.read_bytes()
+        real_replace = os.replace
+
+        def replace(src, dst):
+            if str(dst) == str(config_path):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_replace(src, dst)
+        monkeypatch.setattr("memanga.persist.os.replace", replace)
+        capsys.readouterr()
+
+        assert run_cli("config", "set", "delivery.mode", "email") == 1
+        err = " ".join(capsys.readouterr().err.split())
+        assert "Could not save config.yaml: No space left on device" in err
+        assert "its backup were not changed by this save" in err
+        assert "Traceback" not in err
+        assert config_path.read_bytes() == before
+        assert [p for p in root.iterdir() if p.suffix == ".tmp"] == []
+
+    def test_unreadable_backup_refuses_commands(self, run_cli, isolated_home,
+                                                capsys):
+        root = self._root(isolated_home)
+        (root / "state.json").write_text("{bad", encoding="utf-8")
+        (root / "state.json.bak").mkdir()
+        assert run_cli("list") == 1
+        err = " ".join(capsys.readouterr().err.split())
+        assert "cannot load state file" in err
+        assert "could not be read" in err
+        assert (root / "state.json").read_text(encoding="utf-8") == "{bad"
+
+    def test_unreadable_state_refuses_commands(self, run_cli, isolated_home,
+                                               capsys):
+        root = self._root(isolated_home)
+        (root / "state.json").mkdir()
+        assert run_cli("list") == 1
+        err = capsys.readouterr().err
+        assert "cannot load state file" in err
+        assert "memanga doctor" in err
+        assert (root / "state.json").is_dir()
+        assert run_cli("doctor", "--check", "state") == 1
+        out = " ".join(capsys.readouterr().out.split())
+        assert "State file could not be loaded: cannot read" in out
+
+    def test_gui_receives_loaded_state(self, monkeypatch, isolated_home):
+        monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
+        root = self._root(isolated_home)
+        (root / "state.json").write_text("{bad", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["memanga", "--gui"])
+        from memanga import cli
+        seen = []
+        fake_gui = types.SimpleNamespace(
+            launch_gui=lambda **kwargs: seen.append(kwargs))
+        monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
+        cli.main()
+        assert seen[0]["state"].recovery_notice
+        assert seen[0]["config"] is cli.config
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -4506,7 +4678,7 @@ class TestChapterCheckpoint:
         before = signal.getsignal(signal.SIGTERM)
         seen = []
         fake_gui = types.SimpleNamespace(
-            launch_gui=lambda: seen.append(signal.getsignal(signal.SIGTERM)))
+            launch_gui=lambda **kwargs: seen.append(signal.getsignal(signal.SIGTERM)))
         monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
         cli.main()
         assert seen == [before]

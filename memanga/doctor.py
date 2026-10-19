@@ -269,6 +269,14 @@ def check_state(config, state) -> CheckResult:
     path = Path(state.state_path)
     details = {"path": str(path), "exists": path.exists()}
 
+    # Issue #243: State() could not copy aside or restore a damaged
+    # state.json; its message says what happened and what was kept,
+    # which re-reading the still-damaged file here would hide.
+    load_error = getattr(state, "load_error", None)
+    if load_error:
+        return CheckResult("state", FAIL,
+                           f"State file could not be loaded: {load_error}", details)
+
     if path.exists():
         try:
             with open(path, "r") as f:
@@ -276,8 +284,7 @@ def check_state(config, state) -> CheckResult:
         except OSError as e:
             return CheckResult("state", FAIL, f"State file is not readable: {e}", details)
         except ValueError as e:
-            # State() silently falls back to an empty state on bad JSON,
-            # so the next save would drop the download history.
+            # Damaged after State() loaded it; must be fixed by hand.
             return CheckResult("state", FAIL, f"State file is not valid JSON: {e}", details)
         if not isinstance(data, dict):
             return CheckResult("state", FAIL, "State file does not contain a JSON object", details)
@@ -285,6 +292,11 @@ def check_state(config, state) -> CheckResult:
     error = _probe_writable(path.parent) if path.parent.is_dir() else "directory is missing"
     if error:
         return CheckResult("state", FAIL, f"State directory is not writable: {error}", details)
+    # Issue #243: State() recovered a damaged state.json on this run.
+    notice = getattr(state, "recovery_notice", None)
+    if notice:
+        details["preserved_copy"] = str(state.preserved_path)
+        return CheckResult("state", WARNING, notice, details)
     if not path.exists():
         return CheckResult("state", OK, "No state file yet; it will be created on first save", details)
     return CheckResult("state", OK, "State file is readable and writable", details)

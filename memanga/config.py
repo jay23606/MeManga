@@ -2,13 +2,12 @@
 Configuration management for MeManga
 """
 
-import os
-import tempfile
 import threading
 import yaml
 from pathlib import Path
 
 from .perf import timed
+from .persist import atomic_write_text
 
 
 class ConfigError(Exception):
@@ -184,17 +183,9 @@ class Config:
                 self._data, default_flow_style=False, allow_unicode=True,
             )
 
-        fd, tmp_path = tempfile.mkstemp(dir=self.config_dir, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(payload)
-            os.replace(tmp_path, self.config_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        # Issue #243: keep the previous config as config.yaml.bak.
+        atomic_write_text(self.config_path, payload,
+                          backup_path=self.config_dir / "config.yaml.bak")
 
     def update_manga(self, title, mutator):
         """Atomically mutate the manga entry with the given title.
