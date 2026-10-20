@@ -204,7 +204,7 @@ and download files — you can drive your library from both interchangeably.
 ```bash
 git clone https://github.com/meellm/MeManga.git
 cd MeManga
-python setup.py            # creates a venv + installs everything
+python scripts/bootstrap.py   # creates a venv + installs everything
 ```
 
 The CLI lives at `python -m memanga` once the venv is active.
@@ -474,7 +474,7 @@ aggregators (popularity order):
 ```bash
 git clone https://github.com/meellm/MeManga.git
 cd MeManga
-python setup.py            # one-time venv setup
+python scripts/bootstrap.py   # one-time venv setup
 
 # Dev build — console window stays open for tracebacks
 python build.py            # → ./MeManga-Dev.exe (or ./MeManga-Dev)

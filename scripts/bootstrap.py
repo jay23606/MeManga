@@ -2,6 +2,10 @@
 """
 MeManga Cross-Platform Setup Script
 Works on Windows, macOS, and Linux
+
+Run it explicitly: python scripts/bootstrap.py
+It is not part of the package build. `pip install .` only installs the
+package and never runs these steps.
 """
 
 import subprocess
@@ -9,6 +13,8 @@ import sys
 import os
 import platform
 from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 def run(cmd, shell=True):
     """Run a command and return success status"""
@@ -21,13 +27,12 @@ def main():
     print(f"   Platform: {platform.system()}")
     print()
 
-    script_dir = Path(__file__).parent.absolute()
-    os.chdir(script_dir)
+    os.chdir(PROJECT_DIR)
     
     is_windows = platform.system() == "Windows"
     is_linux = platform.system() == "Linux"
     
-    venv_dir = script_dir / "venv"
+    venv_dir = PROJECT_DIR / "venv"
     
     if is_windows:
         python_exe = venv_dir / "Scripts" / "python.exe"
