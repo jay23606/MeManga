@@ -341,6 +341,68 @@ class TestComicInfoXml:
             "Day", "Writer", "Web", "PageCount",
         ]
 
+    def test_unknown_language_and_direction_are_not_claimed(self):
+        # Issue #246: no guessed language, reading direction or Count.
+        from memanga.downloader import _build_comicinfo_xml
+        from memanga.scrapers.base import Chapter
+        ch = Chapter(number="5", url="https://x.test/c/5")
+        fields = self._parse(_build_comicinfo_xml({"title": "X"}, ch, page_count=1))
+        for absent in ("Manga", "LanguageISO", "Count"):
+            assert absent not in fields
+
+    @pytest.mark.parametrize("language, expected", [
+        ("ja", "ja"), (" pt-BR ", "pt-BR"), ("", None), ("not a tag!", None),
+        (None, None), (5, None),
+    ])
+    def test_language_from_manga_entry(self, language, expected):
+        from memanga.downloader import _build_comicinfo_xml
+        from memanga.scrapers.base import Chapter
+        ch = Chapter(number="5", url="")
+        fields = self._parse(_build_comicinfo_xml(
+            {"title": "X", "language": language}, ch, page_count=1))
+        assert fields.get("LanguageISO") == expected
+
+    @pytest.mark.parametrize("scraper, language, manga_flag", [
+        # Jump manga in English: right to left.
+        ("memanga.scrapers.tcbscans:TCBScansScraper", "en", "YesAndRightToLeft"),
+        # English-only feed; mixes manga and manhwa, so no direction.
+        ("memanga.scrapers.mangadex:MangaDexScraper", "en", None),
+        # Manhwa/webtoon sites must never be flagged right to left.
+        ("memanga.scrapers.asurascans:AsuraScansScraper", None, None),
+        ("memanga.scrapers.flamecomics:FlameComicsScraper", None, None),
+        # Spanish manhwa site: language known, direction not RTL.
+        ("memanga.scrapers.olympus:OlympusScraper", "es", None),
+    ])
+    def test_source_metadata(self, scraper, language, manga_flag):
+        import importlib
+        from memanga.downloader import _build_comicinfo_xml
+        from memanga.scrapers.base import Chapter
+        module, name = scraper.split(":")
+        cls = getattr(importlib.import_module(module), name)
+        ch = Chapter(number="5", url="")
+        fields = self._parse(_build_comicinfo_xml(
+            {"title": "X"}, ch, page_count=1, scraper=cls))
+        assert fields.get("LanguageISO") == language
+        assert fields.get("Manga") == manga_flag
+
+    @pytest.mark.parametrize("entry, manga_flag", [
+        ({"reading_direction": "RTL"}, "YesAndRightToLeft"),
+        ({"reading_direction": "ltr"}, None),
+        ({"reading_direction": "vertical"}, None),
+        ({"reading_direction": "sideways"}, "YesAndRightToLeft"),  # invalid: source value
+    ])
+    def test_manga_entry_direction_overrides_source(self, entry, manga_flag):
+        import types as _types
+        from memanga.downloader import _build_comicinfo_xml
+        from memanga.scrapers.base import Chapter
+        source = _types.SimpleNamespace(content_language="en",
+                                        reading_direction="rtl")
+        fields = self._parse(_build_comicinfo_xml(
+            {"title": "X", "language": "fr", **entry}, Chapter(number="1"),
+            page_count=1, scraper=source))
+        assert fields.get("Manga") == manga_flag
+        assert fields["LanguageISO"] == "fr"
+
     def test_missing_optional_fields_are_omitted(self):
         from memanga.downloader import _build_comicinfo_xml
         from memanga.scrapers.base import Chapter
@@ -422,6 +484,50 @@ class TestImagesToEpub:
             opf = ET.fromstring(zf.read("EPUB/content.opf"))
         meta = opf.find(f"{{{_OPF}}}metadata")
         assert meta.find(f"{{{_DC}}}contributor").text == "MangaDex · Group A"
+
+    def test_author_and_language_metadata(self, jpg_paths, tmp_path):
+        # Issue #246: the creator is the author (never the manga title)
+        # and the language is the manga's, on the package and every page.
+        from memanga.downloader import _images_to_epub
+        out = tmp_path / "ch.epub"
+        _images_to_epub(jpg_paths, out, "Berserk", "1",
+                        author='Kentaro Miura & "Studio"', language="ja")
+        with zipfile.ZipFile(out) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+            pages = [ET.fromstring(zf.read(n)) for n in zf.namelist()
+                     if n.endswith(".xhtml")]
+        xml_lang = "{http://www.w3.org/XML/1998/namespace}lang"
+        meta = opf.find(f"{{{_OPF}}}metadata")
+        assert meta.find(f"{{{_DC}}}creator").text == 'Kentaro Miura & "Studio"'
+        assert meta.find(f"{{{_DC}}}language").text == "ja"
+        assert opf.get(xml_lang) == "ja"
+        assert pages and all(p.get(xml_lang) == "ja" for p in pages)
+
+    def test_no_creator_without_author(self, jpg_paths, tmp_path):
+        from memanga.downloader import _images_to_epub
+        out = tmp_path / "ch.epub"
+        _images_to_epub(jpg_paths, out, title="Berserk", chapter_num="1")
+        with zipfile.ZipFile(out) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+        meta = opf.find(f"{{{_OPF}}}metadata")
+        assert meta.find(f"{{{_DC}}}creator") is None
+
+    def test_unknown_language_is_undetermined(self, jpg_paths, tmp_path):
+        # Issue #246: EPUB requires a language; an unknown one is the
+        # BCP 47 "und" tag on the package and every page, never English.
+        from memanga.downloader import _images_to_epub
+        out = tmp_path / "ch.epub"
+        _images_to_epub(jpg_paths, out, title="Berserk", chapter_num="1")
+        with zipfile.ZipFile(out) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+            pages = [ET.fromstring(zf.read(n)) for n in zf.namelist()
+                     if n.endswith(".xhtml")]
+        xml_lang = "{http://www.w3.org/XML/1998/namespace}lang"
+        meta = opf.find(f"{{{_OPF}}}metadata")
+        assert meta.find(f"{{{_DC}}}language").text == "und"
+        assert opf.get(xml_lang) == "und"
+        assert pages and all(p.get(xml_lang) == "und" and p.get("lang") == "und"
+                             for p in pages)
 
     def test_creates_valid_epub(self, jpg_paths, tmp_path):
         from memanga.downloader import _images_to_epub
@@ -506,7 +612,6 @@ class TestImagesToEpub:
             ET.fromstring(zf.read("EPUB/toc.ncx"))
         meta = opf.find(f"{{{_OPF}}}metadata")
         assert meta.find(f"{{{_DC}}}title").text == f"{title} - Chapter 1<2>"
-        assert meta.find(f"{{{_DC}}}creator").text == title
         assert f"{title} - Chapter 1<2>" in "".join(nav.itertext())
 
     def test_does_not_import_ebooklib(self):

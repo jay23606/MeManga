@@ -523,11 +523,16 @@ def cmd_add(args):
         url = args.url
         backup_url = getattr(args, 'backup', None)
         fallback_days = getattr(args, 'fallback_days', None)
-        if fallback_days is None:
-            fallback_days = DEFAULT_FALLBACK_DELAY_DAYS
         
         if not title or not url:
             return _error("[red]Error:[/red] --title and --url required (or use --interactive)")
+        if fallback_days is not None and not backup_url:
+            return _error(
+                "[red]Error:[/red] --fallback-days needs a backup source "
+                "(add one with --backup URL)"
+            )
+        if fallback_days is None:
+            fallback_days = DEFAULT_FALLBACK_DELAY_DAYS
     
     # Extract source from URL
     parsed = urlparse(url)
@@ -597,6 +602,16 @@ def cmd_add(args):
         if m["title"].lower() == title.lower():
             err_console.print(f"[yellow]⚠️  '{_esc(title)}' already exists![/yellow]")
             return EXIT_ERROR
+
+    # Issue #246: titles that differ only in characters a file name drops
+    # ("A:B" and "AB") would share one download folder and overwrite each
+    # other's chapter files, so --force does not override this.
+    owner = _download_folder_owner(title, manga_list)
+    if owner is not None:
+        return _error(
+            f"[red]Error:[/red] '{_esc(title)}' would use the same download "
+            f"folder as '{_esc(owner['title'])}'; pick another title"
+        )
 
     # Check for similar titles (substring match)
     new_lower = title.lower()
@@ -685,15 +700,21 @@ def _target_error(target: str, candidates: list) -> int:
 
 
 def _shares_download_dir(title: str, others) -> bool:
-    """True if another tracked manga writes to the same download folder.
+    """True if another tracked manga writes to the same download folder."""
+    return _download_folder_owner(title, others) is not None
+
+
+def _download_folder_owner(title: str, others):
+    """The tracked manga in ``others`` that writes to the same download
+    folder as ``title``, or None.
 
     Sanitizing can map different titles to one folder ("A:B" and "AB"),
     and case-insensitive filesystems merge "x" and "X" too.
     """
-    from .downloader import _sanitize_filename
-    name = _sanitize_filename(title).casefold()
-    return any(_sanitize_filename(m.get("title", "")).casefold() == name
-               for m in others)
+    from .downloader import _download_folder_key
+    key = _download_folder_key(title)
+    return next((m for m in others
+                 if _download_folder_key(m.get("title", "")) == key), None)
 
 
 def cmd_remove(args):
@@ -1195,9 +1216,17 @@ def cmd_update(args):
         title = title.strip()
         if not title:
             return _error("[red]Error:[/red] --title cannot be empty")
-        for i, m in enumerate(manga_list):
-            if i != found_idx and m["title"].lower() == title.lower():
+        others = [m for i, m in enumerate(manga_list) if i != found_idx]
+        for m in others:
+            if m["title"].lower() == title.lower():
                 return _error(f"[red]Error:[/red] '{_esc(m['title'])}' already exists; pick another title")
+        # Same folder as another manga: see cmd_add (issue #246).
+        owner = _download_folder_owner(title, others)
+        if owner is not None:
+            return _error(
+                f"[red]Error:[/red] '{_esc(title)}' would use the same download "
+                f"folder as '{_esc(owner['title'])}'; pick another title"
+            )
 
     # Legacy entries keep `source`/`url`; multi-source entries keep a
     # `sources` list whose items are dicts or bare URL strings.
@@ -2370,6 +2399,11 @@ def _add_search_result(result, status=None):
     for m in manga_list:
         if m["title"].lower() == result.title.lower():
             return False, f"'{result.title}' already exists"
+    # Same folder as another manga: see cmd_add (issue #246).
+    owner = _download_folder_owner(result.title, manga_list)
+    if owner is not None:
+        return False, (f"'{result.title}' would use the same download folder "
+                       f"as '{owner['title']}'")
 
     entry = {
         "title": result.title,
@@ -2648,7 +2682,7 @@ def cmd_export(args):
             "another file name."
         )
     try:
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(export_data, f, indent=2, default=str)
     except OSError as exc:
         return _error(f"[red]Cannot export:[/red] {_esc(exc)}")
@@ -2662,7 +2696,10 @@ def _plan_import_merge(existing_manga, imported_manga):
     Returns (merged_list, added_titles, skipped_titles, state_title_aliases).
     ``merged_list`` is a new list; ``existing_manga`` is left as-is so a
     dry run can't leak into the live config (Config.get returns its own
-    object).
+    object). It holds the existing entries first, in their order, followed
+    by the added ones, so ``merged_list[len(merged_list) - len(added_titles):]``
+    are exactly the added entries; cmd_import's download-folder check
+    (_import_folder_clash) relies on this order.
     """
     merged = list(existing_manga)
     existing_titles = {
@@ -2687,6 +2724,32 @@ def _plan_import_merge(existing_manga, imported_manga):
     return merged, added, skipped, state_title_aliases
 
 
+def _import_folder_clash(manga_list, first_new=0):
+    """Error text when an entry the import adds would share a download
+    folder with another entry of the resulting ``manga_list``, else None
+    (issue #246).
+
+    Entries from index ``first_new`` on are the imported ones; clashes
+    only among the entries before it were already tracked and are left
+    alone. Titles like "A:B" and "AB", or "x" and "X" in a replaced list,
+    would write their chapter files into one folder and overwrite each
+    other.
+    """
+    from .downloader import _download_folder_key
+    seen = {}
+    for index, entry in enumerate(manga_list):
+        title = entry.get("title", "")
+        key = _download_folder_key(title)
+        if key in seen and index >= first_new:
+            return (
+                f"[red]Cannot import:[/red] '{_esc(seen[key])}' and "
+                f"'{_esc(title)}' would use the same download folder; rename "
+                "one first. Nothing was changed."
+            )
+        seen.setdefault(key, title)
+    return None
+
+
 def cmd_import(args):
     """Import manga list and download state from JSON.
 
@@ -2703,7 +2766,11 @@ def cmd_import(args):
     if from_stdin:
         source_label = "stdin"
         try:
-            raw = sys.stdin.read()
+            # Decode the bytes as UTF-8 like a file import, not with the
+            # console's code page (Windows).
+            buffer = getattr(sys.stdin, "buffer", None)
+            raw = (buffer.read().decode("utf-8-sig") if buffer is not None
+                   else sys.stdin.read())
         except (OSError, UnicodeDecodeError) as exc:
             return _error(f"[red]Cannot import:[/red] {_esc(exc)}")
     else:
@@ -2712,7 +2779,9 @@ def cmd_import(args):
         if not import_path.exists():
             return _error(f"[red]File not found:[/red] {_esc(import_path)}")
         try:
-            with open(import_path, "r") as f:
+            # utf-8-sig: also accept a backup re-saved with a BOM by an
+            # editor such as Windows Notepad.
+            with open(import_path, "r", encoding="utf-8-sig") as f:
                 raw = f.read()
         except (OSError, UnicodeDecodeError) as exc:
             return _error(f"[red]Cannot import:[/red] {_esc(exc)}")
@@ -2730,6 +2799,9 @@ def cmd_import(args):
 
     if args.replace:
         current_count = len(config.get("manga", []))
+        clash = _import_folder_clash(imported_manga)
+        if clash:
+            return _error(clash)
         if dry_run:
             console.print(
                 f"[cyan]Dry run:[/cyan] would replace {current_count} manga with "
@@ -2761,6 +2833,11 @@ def cmd_import(args):
     merged_manga, added, skipped, state_title_aliases = _plan_import_merge(
         config.get("manga", []), imported_manga,
     )
+    # _plan_import_merge appends the added entries after the existing ones.
+    clash = _import_folder_clash(merged_manga,
+                                 first_new=len(merged_manga) - len(added))
+    if clash:
+        return _error(clash)
 
     # Rehearse the state merge before anything is saved (and before a dry
     # run reports success), so a backup that still can't merge with local
@@ -3444,9 +3521,8 @@ Examples:
     p_add.add_argument("-u", "--url", help="Primary source URL")
     p_add.add_argument("-b", "--backup", help="Backup source URL")
     p_add.add_argument("--fallback-days", type=_non_negative_int_arg,
-                       default=DEFAULT_FALLBACK_DELAY_DAYS,
-                       help="Days to wait before using backup (0 or more; "
-                            f"default: {DEFAULT_FALLBACK_DELAY_DAYS})")
+                       help="Days to wait before using the backup (0 or more; "
+                            f"default: {DEFAULT_FALLBACK_DELAY_DAYS}); needs --backup")
     p_add.add_argument("--status", choices=VALID_STATUSES,
                        help="Initial status (default: reading)")
     p_add.add_argument("--mode", choices=["auto", "manual"],

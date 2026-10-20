@@ -221,10 +221,36 @@ class TestValidateBackupContents:
         ({"version": 1, "manga": [{"title": ["A"]}]}, "entry 1 has no title"),
         ({"version": 1, "manga": [], "state": []}, "state must be an object"),
         ({"version": 1, "manga": [], "state": {"A": "x"}}, "state for 'A'"),
+        # Issue #246: manga fields the downloader reads.
+        ({"version": 1, "manga": [{"title": "A", "url": 5}]},
+         "entry 1 \\('A'\\): url must be text"),
+        ({"version": 1, "manga": [{"title": "A", "source": None}]},
+         "source must be text"),
+        ({"version": 1, "manga": [{"title": "A", "sources": "https://x"}]},
+         "sources must be a list"),
+        ({"version": 1, "manga": [{"title": "A", "sources": [{"url": 1}]}]},
+         "sources must be a list"),
+        ({"version": 1, "manga": [{"title": "A", "sources": [3]}]},
+         "sources must be a list"),
+        ({"version": 1, "manga": [{"title": "A", "fallback_delay_days": "2"}]},
+         "fallback_delay_days must be a whole number"),
+        ({"version": 1, "manga": [{"title": "A", "fallback_delay_days": True}]},
+         "fallback_delay_days must be a whole number"),
     ])
     def test_malformed_payload_rejected(self, data, match):
         with pytest.raises(BackupVersionError, match=match):
             validate_backup_contents(data)
+
+    @pytest.mark.parametrize("entry", [
+        {"title": "A", "source": "mangadex.org", "url": "https://x"},
+        {"title": "A", "fallback_delay_days": 0, "sources": [
+            "https://x", {"url": "https://y", "source": "y.test"},
+            {"url": "https://z", "source": None}]},
+        {"title": "A", "sources": [], "cover_url": None, "extra": [1]},
+    ])
+    def test_manga_entry_shapes_memanga_writes_are_accepted(self, entry):
+        data = {"version": 1, "manga": [entry]}
+        assert validate_backup_contents(data) == ([entry], {})
 
     @pytest.mark.parametrize("field, value", [
         ("downloaded", 5),

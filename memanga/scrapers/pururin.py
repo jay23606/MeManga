@@ -113,7 +113,7 @@ class PururinScraper(PlaywrightScraper):
                             src = img.get('src') or img.get('data-src')
                             if src and src not in pages:
                                 pages.append(src)
-                    except:
+                    except Exception:
                         pass
         
         return pages

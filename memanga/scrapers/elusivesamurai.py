@@ -69,7 +69,7 @@ class ElusiveSamuraiScraper(BaseScraper):
         def parse_number(n):
             try:
                 return float(n)
-            except:
+            except Exception:
                 return 0
         chapters.sort(key=lambda c: parse_number(c.number))
         return chapters

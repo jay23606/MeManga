@@ -63,7 +63,7 @@ class MGekoScraper(BaseScraper):
         
         try:
             html = self._get_html(all_chapters_url)
-        except:
+        except Exception:
             html = self._get_html(manga_url)
         
         soup = BeautifulSoup(html, "html.parser")

@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_escape
 
+from .cbz import UNDETERMINED_LANGUAGE
 from .images import _image_to_jpeg_bytes
 
 
 _EPUB_PAGE_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
 <head><title>{title}</title>
 <meta name="viewport" content="width={width}, height={height}"/>
 <style>html,body{{margin:0;padding:0;width:100%;height:100%}}
@@ -36,6 +37,8 @@ def _images_to_epub(
     chapter_num: str,
     cover_image_path: Optional[Path] = None,
     credit: Optional[str] = None,
+    author: Optional[str] = None,
+    language: Optional[str] = None,
 ):
     """Convert images to a fixed-layout EPUB compatible with Kindle.
 
@@ -48,11 +51,19 @@ def _images_to_epub(
         title: Manga title.
         chapter_num: Chapter number string.
         cover_image_path: Optional separate cover image. Falls back to first page.
+        credit: Optional contributor credit (MangaDex scanlation groups).
+        author: The manga's author, when known. Without one no creator is
+            written; the manga title is not an author.
+        language: BCP 47 language tag of the pages' text. When it is not
+            known, "und" (undetermined) is written on the package and every
+            page, since EPUB requires a language.
     """
     attr = {'"': "&quot;"}
     book_id = f"urn:uuid:{uuid.uuid4()}"
     full_title = f"{title} - Chapter {chapter_num}"
     modified = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    language = language or UNDETERMINED_LANGUAGE
+    lang = _xml_escape(language, attr)
 
     files: List[Tuple[str, bytes]] = []  # (path inside EPUB/, content)
     manifest: List[str] = []
@@ -69,6 +80,7 @@ def _images_to_epub(
                         'media-type="image/jpeg" properties="cover-image"/>')
         files.append(("cover.xhtml", _EPUB_PAGE_TEMPLATE.format(
             title="Cover", width=cw, height=ch, src="images/cover.jpg",
+            lang=lang,
         ).encode("utf-8")))
         manifest.append('<item id="cover" href="cover.xhtml" '
                         'media-type="application/xhtml+xml"/>')
@@ -82,6 +94,7 @@ def _images_to_epub(
         manifest.append(f'<item id="img_{i}" href="images/{img_name}" media-type="image/jpeg"/>')
         files.append((f"page_{i:03d}.xhtml", _EPUB_PAGE_TEMPLATE.format(
             title=f"Page {i + 1}", width=width, height=height, src=f"images/{img_name}",
+            lang=lang,
         ).encode("utf-8")))
         manifest.append(f'<item id="page_{i:03d}" href="page_{i:03d}.xhtml" '
                         'media-type="application/xhtml+xml"/>')
@@ -92,7 +105,7 @@ def _images_to_epub(
     title_text = _xml_escape(full_title)
     files.append(("nav.xhtml", f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
 <head><title>{title_text}</title></head>
 <body><nav epub:type="toc" id="toc"><ol><li><a href="{first_href}">{title_text}</a></li></ol></nav></body></html>
 """.encode("utf-8")))
@@ -115,13 +128,16 @@ def _images_to_epub(
     spine_xml = "\n    ".join(f'<itemref idref="{idref}"/>' for idref in spine)
     cover_meta = '\n    <meta name="cover" content="cover-image"/>' if cover_src else ""
     credit_meta = f"<dc:contributor>{_xml_escape(credit)}</dc:contributor>" if credit else ""
+    author = author.strip() if isinstance(author, str) else ""
+    creator_meta = (f'<dc:creator id="creator">{_xml_escape(author)}</dc:creator>'
+                    if author else "")
     opf = f"""<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id" xml:lang="en">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id" xml:lang="{lang}">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="id">{_xml_escape(book_id)}</dc:identifier>
     <dc:title>{title_text}</dc:title>
-    <dc:language>en</dc:language>
-    <dc:creator id="creator">{_xml_escape(title)}</dc:creator>
+    <dc:language>{_xml_escape(language)}</dc:language>
+    {creator_meta}
     {credit_meta}
     <meta property="dcterms:modified">{modified}</meta>
     <meta property="rendition:layout">pre-paginated</meta>

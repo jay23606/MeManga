@@ -141,6 +141,31 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #246 File and folder names are valid on Windows, macOS and Linux:
+  control characters are removed and a Windows device name such as
+  `CON` or `nul` gets a `_` suffix. `add`, `edit --title`, `search --add`
+  and the app's Add page refuse a title that would share another
+  manga's download folder (`A:B` and `AB`), since their chapter files
+  would overwrite each other.
+- #246 EPUB metadata no longer names the manga title as the author. The
+  author comes from the manga entry; the language comes from the entry's
+  `language` or from a source that serves one language (MangaDex, TCB
+  Scans, Thunder Scans EN, the Spanish and Indonesian sources), and is
+  `und` (undetermined) instead of English when unknown. CBZ ComicInfo
+  adds `LanguageISO` when the language is known and `Manga` =
+  `YesAndRightToLeft` only for titles known to read right to left (TCB
+  Scans, or `reading_direction: rtl` on the manga entry); manhwa and
+  webtoons are no longer marked right to left.
+- #246 Cancelling a chapter download waits for page downloads already
+  in progress before the temporary folder is removed.
+- #246 `add --fallback-days` without `--backup` fails instead of being
+  ignored. `import` reads files as UTF-8 (a BOM is accepted) and rejects,
+  before anything is written, manga entries whose `url`, `source`,
+  `sources` or `fallback_delay_days` have the wrong type, and imports
+  (merge or `--replace`) that would give two manga the same download
+  folder.
+- #246 Config changes from different threads take the same lock as
+  saving, and scrapers no longer swallow Ctrl+C.
 - #212 Installing the package (`pip install .`, `pip install -e ".[dev]"`,
   `pip wheel .`) no longer runs the setup script. The build backend
   executed the old root `setup.py`, which created a `venv`, installed

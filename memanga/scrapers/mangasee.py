@@ -76,7 +76,7 @@ class MangaSeeScraper(BaseScraper):
                                 number=ch_num,
                                 url=chapter_url,
                             ))
-                    except:
+                    except Exception:
                         pass
         
         # Fallback: scrape links directly
@@ -129,7 +129,7 @@ class MangaSeeScraper(BaseScraper):
                             page_num = str(i).zfill(3)
                             img_url = f"https://{path_name}/manga/{chapter_url.split('/')[-1].split('-chapter-')[0]}/{ch_formatted}-{page_num}.png"
                             pages.append(img_url)
-                    except:
+                    except Exception:
                         pass
         
         # Fallback: look for images directly

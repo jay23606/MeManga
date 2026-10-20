@@ -258,6 +258,28 @@ class TestAddCommand:
         titles = [m["title"] for m in config.get("manga", []) or []]
         assert "Added One" in titles
 
+    @pytest.mark.parametrize("flags", [(), ("--force",)])
+    @pytest.mark.parametrize("existing, title", [
+        ("Re:Zero", "ReZero"),
+        ("Cafe\u0301", "Caf\u00e9"),
+    ])
+    def test_title_sharing_download_folder_rejected(
+            self, run_cli, isolated_home, config, capsys, flags, existing, title):
+        # Issue #246: both titles would write to one folder and overwrite
+        # each other's chapter files, so even --force refuses.
+        assert run_cli("add", "--title", existing, "--url",
+                       "https://mangadex.org/title/a/x") == 0
+        path = isolated_home / ".config" / "memanga" / "config.yaml"
+        before = path.read_bytes()
+        capsys.readouterr()
+
+        rc = run_cli("add", "--title", title, "--url",
+                     "https://mangadex.org/title/b/x", *flags)
+
+        assert rc == 1
+        assert "same download folder" in capsys.readouterr().err
+        assert path.read_bytes() == before
+
     def test_add_dedupes(self, run_cli, config):
         run_cli("add", "--url", "https://mangadex.org/title/a/x",
                 "--title", "Dup")
@@ -307,6 +329,17 @@ class TestAddFallbackDays:
             assert path.read_bytes() == before
         else:
             assert not path.exists()
+
+    def test_delay_without_backup_rejected(self, run_cli, isolated_home,
+                                           config, capsys):
+        # Issue #246: the delay used to be silently ignored without --backup.
+        path = isolated_home / ".config" / "memanga" / "config.yaml"
+        rc = run_cli("add", "--title", "Delay Test",
+                     "--url", "https://mangadex.org/title/a/x",
+                     "--fallback-days", "3")
+        assert rc == 1
+        assert "--fallback-days needs a backup source" in capsys.readouterr().err
+        assert not path.exists() or not config.get("manga")
 
     @pytest.mark.parametrize(("flags", "expected"), [
         (("--fallback-days", "0"), 0),
@@ -692,6 +725,16 @@ class TestUpdatePolicyFields:
         reloaded = State(config_dir=cli_state.state_path.parent)
         assert reloaded.get_downloaded_chapters("Renamed") == ["4"]
         assert reloaded.get_downloaded_chapters("Multi") == []
+
+    def test_rename_to_title_sharing_download_folder_rejected(
+            self, run_cli, config, seed, capsys):
+        # Issue #246: "Multi:" sanitizes to Multi's folder.
+        path = seed(LEGACY, MULTI)
+        before = path.read_bytes()
+        capsys.readouterr()
+        assert run_cli("update", "Legacy", "--title", "Multi:") == 1
+        assert "same download folder as 'Multi'" in capsys.readouterr().err
+        assert path.read_bytes() == before
 
     def test_title_case_only_rename(self, run_cli, config, seed):
         seed(LEGACY)
@@ -1781,6 +1824,78 @@ class TestImportExportStreams:
     def _titles(self, config):
         return [m["title"] for m in config.get("manga", []) or []]
 
+    # ── download-folder collisions (issue #246) ──
+
+    @staticmethod
+    def _backup(*titles):
+        return json.dumps({"version": 1, "manga": [
+            {"title": t, "url": f"https://mangadex.org/title/{i}",
+             "source": "mangadex.org"} for i, t in enumerate(titles)]})
+
+    @pytest.mark.parametrize("mode", [
+        ("--replace", "--yes"), ("--replace", "--dry-run")])
+    @pytest.mark.parametrize("titles", [("A:B", "AB"), ("Fresh", "fresh")])
+    def test_replace_with_shared_download_folder_rejected(
+            self, run_cli, seeded, monkeypatch, capsys, mode, titles):
+        before = seeded()
+        self._stdin(monkeypatch, self._backup(*titles))
+        capsys.readouterr()
+        assert run_cli("import", "-", *mode) == 1
+        err = capsys.readouterr().err
+        assert "same download folder" in err
+        assert "Cannot import" in err
+        assert seeded() == before
+
+    @pytest.mark.parametrize("dry_run", [(), ("--dry-run",)])
+    @pytest.mark.parametrize("titles", [("Local:",), ("New", "NEW:")])
+    def test_merge_with_shared_download_folder_rejected(
+            self, run_cli, seeded, monkeypatch, capsys, dry_run, titles):
+        # "Local:" is a new title for the merge but writes to the existing
+        # "Local" folder; "New" and "NEW:" clash with each other.
+        before = seeded()
+        self._stdin(monkeypatch, self._backup(*titles))
+        capsys.readouterr()
+        assert run_cli("import", "-", *dry_run) == 1
+        assert "same download folder" in capsys.readouterr().err
+        assert seeded() == before
+
+    def test_merge_case_only_duplicate_is_merged_not_rejected(
+            self, run_cli, seeded, config, monkeypatch):
+        self._stdin(monkeypatch, self._backup("LOCAL", "Other"))
+        assert run_cli("import", "-") == 0
+        assert self._titles(config) == ["Local", "Other"]
+
+    def test_merge_ignores_clash_already_in_library(
+            self, run_cli, seeded, config, monkeypatch):
+        # Entries tracked before this check existed don't block imports.
+        config.set("manga", [
+            {"title": "A:B", "url": "https://mangadex.org/title/1"},
+            {"title": "AB", "url": "https://mangadex.org/title/2"},
+        ])
+        config.save()
+        self._stdin(monkeypatch, self._backup("Other"))
+        assert run_cli("import", "-") == 0
+        assert self._titles(config) == ["A:B", "AB", "Other"]
+
+    def test_import_file_is_read_as_utf8_with_bom(
+            self, run_cli, seeded, config, tmp_path):
+        # Issue #246: a backup re-saved by an editor that adds a BOM, with
+        # non-ASCII titles, imports the same on every platform.
+        backup = tmp_path / "bom.json"
+        backup.write_text(json.dumps({
+            "version": 1,
+            "manga": [{"title": "\u9032\u6483 Caf\u00e9", "url": "u",
+                       "source": "mangadex.org"}],
+        }, ensure_ascii=False), encoding="utf-8-sig")
+        assert run_cli("import", str(backup)) == 0
+        assert "\u9032\u6483 Caf\u00e9" in self._titles(config)
+
+    def test_export_file_is_utf8(self, run_cli, seeded, tmp_path):
+        out = tmp_path / "out.json"
+        assert run_cli("export", str(out)) == 0
+        data = json.loads(out.read_bytes().decode("utf-8"))
+        assert [m["title"] for m in data["manga"]] == ["Local"]
+
     # ── export - ──
 
     def test_export_dash_writes_only_json_to_stdout(
@@ -1942,6 +2057,8 @@ class TestImportExportStreams:
         (json.dumps({"version": 1, "manga": [], "state": {"T": []}}),
          "state for 'T' must be an object"),
         (json.dumps({"version": 2, "manga": []}), "newer"),
+        (json.dumps({"version": 1, "manga": [{"title": "Ok", "sources": "u"}]}),
+         "sources must be a list"),
     ])
     @pytest.mark.parametrize("replace", [False, True])
     def test_invalid_backup_rejected_before_any_write(

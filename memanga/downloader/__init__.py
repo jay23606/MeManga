@@ -37,7 +37,8 @@ from .formats import (_EPUB_CONTAINER_XML, _EPUB_PAGE_TEMPLATE,
                       _build_comicinfo_xml, _image_to_jpeg_bytes,
                       _images_to_cbz, _images_to_epub, _images_to_folder,
                       _images_to_pdf, _parse_comicinfo_date)
-from .naming import _format_chapter_number, _get_extension, _sanitize_filename
+from .naming import (_download_folder_key, _format_chapter_number,
+                     _get_extension, _sanitize_filename)
 from .post_processing import (_POST_PROCESSING_PLACEHOLDER_RE,
                               POST_PROCESSING_TIMEOUT, _drain_after_timeout,
                               _run_post_processing,

@@ -211,6 +211,15 @@ class AddMangaDialog(ModalDialog):
         for m in existing:
             if m.get("title", "").lower() == title.lower():
                 return
+        # Titles that sanitize to one download folder ("A:B" and "AB")
+        # would overwrite each other's chapter files (issue #246).
+        from ...downloader import _download_folder_key
+        folder_key = _download_folder_key(title)
+        for m in existing:
+            if _download_folder_key(m.get("title", "")) == folder_key:
+                Toast(self, f"'{m.get('title', '')}' already uses this download "
+                            "folder; pick another title", kind="error")
+                return
 
         try:
             domain = urlparse(url).netloc.replace("www.", "")
