@@ -17,9 +17,11 @@ def _images_to_pdf(image_paths: List[Path], output_path: Path,
     for img_path in image_paths:
         try:
             jpeg_data, _, _ = _image_to_jpeg_bytes(img_path)
-            processed_images.append(jpeg_data)
         except Exception as e:
-            print(f"  Warning: Could not process {img_path}: {e}")
+            # Skipping the page would save an incomplete chapter as if it
+            # were whole (issue #229).
+            raise DownloaderError(f"Could not process {Path(img_path).name}: {e}") from e
+        processed_images.append(jpeg_data)
 
     if not processed_images:
         raise DownloaderError("No images could be processed")

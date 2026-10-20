@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
+from PIL import Image
 
 from memanga.scrapers import get_scraper
 from memanga.scrapers.vymanga import VyMangaScraper
@@ -174,8 +177,11 @@ class TestGetPages:
 
 class TestDownloadImage:
     def test_success_writes_file(self, monkeypatch, scraper, tmp_path, fake_response):
+        # Inherits BaseScraper.download_image, which rejects non-image bodies.
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "JPEG")
         monkeypatch.setattr(scraper.session, "get",
-                             lambda *a, **k: fake_response(content=b"data" * 100))
+                             lambda *a, **k: fake_response(content=buf.getvalue()))
         ok = scraper.download_image("https://x.com/p.jpg", tmp_path / "p.jpg")
         assert ok is True
         assert (tmp_path / "p.jpg").exists()

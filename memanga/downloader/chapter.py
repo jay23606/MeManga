@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from ..scrapers import get_scraper
-from ..scrapers.base import Chapter
+from ..scrapers.base import Chapter, is_image_file
 from ..state import State
 from .errors import DownloaderError
 from .formats import (_build_comicinfo_xml, _images_to_cbz, _images_to_epub,
@@ -126,6 +126,17 @@ def download_chapter(
         if not page_urls:
             raise DownloaderError("No pages found for chapter")
 
+        def _fetch_page(url, img_path) -> bool:
+            # A page counts only when the saved bytes are an image, whatever
+            # the scraper returned: an HTML block page or empty body is a
+            # failed page that goes through retry/partial handling (#229).
+            if not scraper.download_image(url, img_path):
+                return False
+            if is_image_file(img_path):
+                return True
+            Path(img_path).unlink(missing_ok=True)
+            return False
+
         # Download images concurrently
         download_tasks = []
         for i, url in enumerate(page_urls):
@@ -142,7 +153,7 @@ def download_chapter(
         cancelled = False
         try:
             futures = {
-                executor.submit(scraper.download_image, url, img_path): (idx, url, img_path)
+                executor.submit(_fetch_page, url, img_path): (idx, url, img_path)
                 for idx, url, img_path in download_tasks
             }
             for future in as_completed(futures):
@@ -190,7 +201,7 @@ def download_chapter(
                 for idx, url, img_path in failed:
                     _check_cancel()
                     try:
-                        if scraper.download_image(url, img_path):
+                        if _fetch_page(url, img_path):
                             results[idx] = img_path
                     except Exception:
                         pass
@@ -250,7 +261,7 @@ def download_chapter(
             if cover_url:
                 cover_path = temp_path / "cover_art.jpg"
                 try:
-                    if not scraper.download_image(cover_url, cover_path):
+                    if not _fetch_page(cover_url, cover_path):
                         cover_path = None
                 except Exception:
                     cover_path = None
