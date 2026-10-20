@@ -360,14 +360,15 @@ class Config:
         return value
     
     def set(self, key, value):
-        """Set a config value."""
+        """Set a config value. Thread-safe (holds ``_lock``)."""
         keys = key.split(".")
-        data = self._data
-        for k in keys[:-1]:
-            if k not in data or not isinstance(data[k], dict):
-                data[k] = {}
-            data = data[k]
-        data[keys[-1]] = value
+        with self._lock:
+            data = self._data
+            for k in keys[:-1]:
+                if k not in data or not isinstance(data[k], dict):
+                    data[k] = {}
+                data = data[k]
+            data[keys[-1]] = value
     
     @timed("config.save")
     def save(self):
@@ -413,9 +414,11 @@ class Config:
         return True
     
     def reset(self):
-        """Reset to default config."""
-        self._data = self._default_config()
-        self.save()
+        """Reset to default config and save it. Thread-safe: the lock is
+        held across both, so no other thread's change lands in between."""
+        with self._lock:
+            self._data = self._default_config()
+            self.save()
     
     # Convenience properties
     @property

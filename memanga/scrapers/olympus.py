@@ -39,6 +39,7 @@ class OlympusScraper(BaseScraper):
 
     name = "olympus"
     base_url = "https://olympusxyz.com"
+    content_language = "es"  # Spanish-language site
     panel_api = "https://panel.olympusxyz.com/api"
 
     # Series pages are /series/comic-<slug> (or novela-<slug>); reader pages

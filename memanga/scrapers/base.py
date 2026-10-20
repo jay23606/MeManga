@@ -198,6 +198,11 @@ class BaseScraper(ABC):
 
     name: str = "base"
     base_url: str = ""
+    # Output metadata the source guarantees for every title, or None when
+    # it varies or is unknown: the BCP 47 language of the translations it
+    # serves, and "rtl" when every title reads right to left.
+    content_language: Optional[str] = None
+    reading_direction: Optional[str] = None
 
     def __init__(self):
         self.session = requests.Session()

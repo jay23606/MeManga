@@ -73,7 +73,7 @@ class MangaTaroScraper(BaseScraper):
                         url=direct_url,
                         cover_url=cover_url,
                     ))
-        except:
+        except Exception:
             pass
         
         # Method 2: Browse API endpoint and filter
@@ -100,7 +100,7 @@ class MangaTaroScraper(BaseScraper):
                                 url=manga_url,
                                 cover_url=None,
                             ))
-        except:
+        except Exception:
             pass
         
         return results[:10]

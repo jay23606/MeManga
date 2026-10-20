@@ -1,11 +1,52 @@
 """CBZ/ZIP archive writer and ComicInfo.xml metadata."""
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...scrapers.base import Chapter
 from ..errors import DownloaderError
+
+
+# BCP 47 "undetermined" language. EPUB requires a language, so it is
+# written there when neither the manga entry nor its source names one;
+# ComicInfo then omits LanguageISO instead.
+UNDETERMINED_LANGUAGE = "und"
+# BCP 47 shape: a 2-3 letter language plus optional subtags ("pt-BR").
+_LANGUAGE_TAG_RE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*", re.ASCII)
+_READING_DIRECTIONS = ("rtl", "ltr", "vertical")
+
+
+def _language_tag(value: Any) -> Optional[str]:
+    if isinstance(value, str) and _LANGUAGE_TAG_RE.fullmatch(value.strip()):
+        return value.strip()
+    return None
+
+
+def _reading_direction_value(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip().lower() in _READING_DIRECTIONS:
+        return value.strip().lower()
+    return None
+
+
+def _manga_language(manga: Dict[str, Any], scraper=None) -> Optional[str]:
+    """Language tag of a manga's pages, or None when unknown.
+
+    The manga entry's ``language`` wins; otherwise the source's
+    ``content_language`` is used, which only sources serving a single
+    language set. Nothing is guessed.
+    """
+    return (_language_tag(manga.get("language"))
+            or _language_tag(getattr(scraper, "content_language", None)))
+
+
+def _reading_direction(manga: Dict[str, Any], scraper=None) -> Optional[str]:
+    """``"rtl"``, ``"ltr"`` or ``"vertical"`` for a manga, or None when
+    unknown: the manga entry's ``reading_direction`` wins over the
+    source's."""
+    return (_reading_direction_value(manga.get("reading_direction"))
+            or _reading_direction_value(getattr(scraper, "reading_direction", None)))
 
 
 def _parse_comicinfo_date(date_str: Optional[str]) -> Optional[Tuple[int, int, int]]:
@@ -46,6 +87,7 @@ def _build_comicinfo_xml(
     manga: Dict[str, Any],
     chapter: Chapter,
     page_count: int,
+    scraper=None,
 ) -> bytes:
     """Build a ComicInfo.xml document from already-known metadata.
 
@@ -53,6 +95,16 @@ def _build_comicinfo_xml(
     the ``Chapter`` object) are written; no extra network requests are
     made. Optional fields with no data are omitted entirely. Serialization
     and XML escaping are handled by ElementTree.
+
+    ``scraper`` is the chapter's source; its declared language and
+    reading direction are used when the manga entry names none.
+    ``LanguageISO`` is written only for a known language, and
+    ``Manga=YesAndRightToLeft`` only for a known right-to-left title:
+    manhwa and webtoons read left to right or top to bottom, and ComicInfo
+    has no value for those, so an unknown or non-RTL title gets no
+    ``Manga`` field. ``Count`` (the series' total number of chapters) is
+    not written: MeManga does not know it, and readers such as Kavita and
+    Komga take it as final and mark the series complete.
     """
     from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -90,6 +142,9 @@ def _build_comicinfo_xml(
     # Web: prefer the specific chapter URL, fall back to the manga URL.
     add("Web", getattr(chapter, "url", "") or manga.get("url", ""))
     add("PageCount", page_count)
+    add("LanguageISO", _manga_language(manga, scraper))
+    if _reading_direction(manga, scraper) == "rtl":
+        add("Manga", "YesAndRightToLeft")
 
     return tostring(root, encoding="utf-8", xml_declaration=True)
 

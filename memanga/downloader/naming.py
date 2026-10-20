@@ -1,6 +1,7 @@
 """File and chapter naming helpers shared by the download engine."""
 
 import re
+import unicodedata
 
 # Default output name pattern; the settings page and config use the same text.
 DEFAULT_NAMING_TEMPLATE = "{title} - Chapter {chapter}"
@@ -11,6 +12,14 @@ _MAX_NAME_LENGTH = 100
 # ("0002_Part 10") fit, so a manga's chapters keep one title prefix.
 _CHAPTER_TEXT_RESERVE = 24
 _INVALID_FILENAME_CHARS = '<>:"/\\|?*'
+# Windows device names: a file or folder whose name before the first dot
+# is one of these (any case, trailing spaces ignored) opens the device
+# instead ("CON", "nul.cbz", "COM1 .pdf"). The superscript digits count
+# as well on Windows.
+_WINDOWS_RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"{dev}{n}" for dev in ("COM", "LPT") for n in "0123456789\u00b9\u00b2\u00b3"]
+)
 
 
 def _get_extension(url: str) -> str:
@@ -25,7 +34,8 @@ def _get_extension(url: str) -> str:
 
 
 def _sanitize_filename(name: str) -> str:
-    """Make a string safe for use as filename."""
+    """Make a string safe for use as a file or folder name on Windows,
+    macOS and Linux."""
     name = _strip_invalid_chars(name).strip()[:_MAX_NAME_LENGTH]
     # Windows trims trailing dots/spaces from path components, so remove
     # them explicitly after truncation to keep generated paths stable.
@@ -34,14 +44,37 @@ def _sanitize_filename(name: str) -> str:
     # directory references, not usable path components.
     if not name.strip('.'):
         return 'untitled'
-    return name
+    return _avoid_reserved_name(name)
 
 
 def _strip_invalid_chars(name: str) -> str:
-    """Remove characters that are not allowed in file names."""
+    """Remove characters that are not allowed in file names: the
+    Windows-reserved punctuation and control characters."""
     for char in _INVALID_FILENAME_CHARS:
         name = name.replace(char, '')
-    return name
+    return ''.join(c for c in name if unicodedata.category(c) != 'Cc')
+
+
+def _avoid_reserved_name(name: str) -> str:
+    """Append "_" to a Windows device name ("CON" -> "CON_",
+    "nul.v2" -> "nul_.v2") so the result names a real file everywhere."""
+    stem, dot, rest = name.partition('.')
+    if stem.rstrip(' ').upper() not in _WINDOWS_RESERVED_NAMES:
+        return name
+    name = f"{stem.rstrip(' ')}_{dot}{rest}"
+    # The stem is at most five characters, so cutting the end keeps it.
+    return name[:_MAX_NAME_LENGTH].rstrip(". ")
+
+
+def _download_folder_key(title: str) -> str:
+    """Key under which two titles share one download folder.
+
+    Sanitizing can map different titles to one name ("A:B" and "AB"),
+    case-insensitive file systems merge "x" and "X", and macOS stores
+    composed and decomposed accents alike. Equal keys mean the titles
+    would write into, and overwrite files in, the same folder.
+    """
+    return unicodedata.normalize("NFC", _sanitize_filename(title)).casefold()
 
 
 def _chapter_base_name(template: str, title: str, chapter: str,

@@ -76,7 +76,7 @@ class ReadOshiNoKoScraper(BaseScraper):
             def sort_key(ch):
                 try:
                     return float(ch.number)
-                except:
+                except Exception:
                     return 0
             chapters.sort(key=sort_key, reverse=True)
             

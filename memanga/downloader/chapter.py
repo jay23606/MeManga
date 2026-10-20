@@ -12,7 +12,7 @@ from ..scrapers.base import Chapter, is_image_file
 from ..state import State
 from .errors import DownloaderError
 from .formats import (_build_comicinfo_xml, _images_to_cbz, _images_to_epub,
-                      _images_to_folder, _images_to_pdf)
+                      _images_to_folder, _images_to_pdf, _manga_language)
 from .naming import (DEFAULT_NAMING_TEMPLATE, _chapter_base_name,
                      _format_chapter_number, _get_extension,
                      _sanitize_filename)
@@ -147,8 +147,8 @@ def download_chapter(
         results: Dict[int, Path] = {}
         total_pages = len(download_tasks)
         completed_count = 0
-        # Manually manage the pool so we can `cancel_futures=True` and bail
-        # without waiting for in-flight image fetches when the user cancels.
+        # Manually manage the pool so we can `cancel_futures=True` and stop
+        # queued page fetches when the user cancels.
         executor = ThreadPoolExecutor(max_workers=4)
         cancelled = False
         try:
@@ -174,9 +174,13 @@ def download_chapter(
                     cancelled = True
                     break
         finally:
-            # cancel_futures only ditches futures that haven't started yet;
-            # in-flight ones still run to completion but we don't wait on them.
-            executor.shutdown(wait=False, cancel_futures=True)
+            # cancel_futures only ditches futures that haven't started yet.
+            # Wait for the in-flight ones (each bounded by the scraper's
+            # request timeout): they write into temp_path, which is removed
+            # when this block exits, and a worker still writing then would
+            # make the cleanup fail (Windows) or recreate the folder and
+            # leave it behind (issue #246).
+            executor.shutdown(wait=True, cancel_futures=True)
 
         if cancelled:
             raise InterruptedError("Download cancelled")
@@ -301,13 +305,16 @@ def download_chapter(
             output_path = manga_dir / f"{base_name}.epub"
             try:
                 _images_to_epub(image_paths, output_path, title, chapter.number,
-                                cover_path, credit=credit)
+                                cover_path, credit=credit,
+                                author=manga.get("author"),
+                                language=_manga_language(manga, scraper))
             except Exception as e:
                 raise DownloaderError(f"Failed to create EPUB: {e}")
         elif output_format == "cbz":
             output_path = manga_dir / f"{base_name}.cbz"
             try:
-                comicinfo_xml = _build_comicinfo_xml(manga, chapter, len(image_paths))
+                comicinfo_xml = _build_comicinfo_xml(manga, chapter, len(image_paths),
+                                                     scraper=scraper)
                 _images_to_cbz(image_paths, output_path, comicinfo_xml,
                                credit=credit)
             except Exception as e:

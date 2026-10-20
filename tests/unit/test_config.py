@@ -32,6 +32,36 @@ class TestConfigBasics:
         assert a == {"b": {"c": 42}}
 
 
+class TestConfigLocking:
+    """Issue #246: set() and reset() mutate under the same lock as save()."""
+
+    @staticmethod
+    def _blocks_until_lock_released(config, action):
+        import threading
+        config._lock.acquire()
+        worker = threading.Thread(target=action, daemon=True)
+        try:
+            worker.start()
+            worker.join(0.3)
+            assert worker.is_alive(), "ran without taking the config lock"
+        finally:
+            config._lock.release()
+        worker.join(5)
+        assert not worker.is_alive()
+
+    def test_set_waits_for_lock(self, config):
+        self._blocks_until_lock_released(
+            config, lambda: config.set("gui.sort_by", "status"))
+        assert config.get("gui.sort_by") == "status"
+
+    def test_reset_waits_for_lock(self, config):
+        config.set("gui.sort_by", "status")
+        self._blocks_until_lock_released(config, config.reset)
+        assert config.get("gui.sort_by") == "title"
+        config.reload()
+        assert config.get("gui.sort_by") == "title"
+
+
 class TestPartialChapterConfig:
     """Partial-chapter tolerance settings (issue #86)."""
 

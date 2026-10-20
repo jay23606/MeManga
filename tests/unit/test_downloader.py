@@ -55,6 +55,58 @@ class TestSanitizeFilename:
         assert _sanitize_filename("a" * 99 + ".b") == "a" * 99
         assert _sanitize_filename("Vol. 2.") == "Vol. 2"
 
+    def test_strips_control_characters(self):
+        # Issue #246: control characters are invalid in Windows names.
+        from memanga.downloader import _sanitize_filename
+        assert _sanitize_filename("A\x00B\nC\tD\x7fE\x85F") == "ABCDEF"
+        assert _sanitize_filename("\x01\x02") == "untitled"
+
+    @pytest.mark.parametrize("name, expected", [
+        ("CON", "CON_"),
+        ("nul", "nul_"),
+        ("Aux", "Aux_"),
+        ("prn.v2", "prn_.v2"),
+        ("COM1", "COM1_"),
+        ("lpt9.cbz", "lpt9_.cbz"),
+        ("COM¹", "COM¹_"),
+        ("CON .x", "CON_.x"),
+        ("CON.", "CON_"),
+    ])
+    def test_windows_device_names_get_suffix(self, name, expected):
+        from memanga.downloader import _sanitize_filename
+        assert _sanitize_filename(name) == expected
+
+    @pytest.mark.parametrize("name", [
+        "Console", "COM10", "CONTACT", "Nul - Chapter 0001.000", "A CON",
+    ])
+    def test_names_merely_containing_device_names_unchanged(self, name):
+        from memanga.downloader import _sanitize_filename
+        assert _sanitize_filename(name) == name
+
+    def test_device_name_suffix_keeps_length_limit(self):
+        from memanga.downloader import _sanitize_filename
+        out = _sanitize_filename("CON." + "a" * 200)
+        assert out.startswith("CON_.")
+        assert len(out) <= 100
+
+
+class TestDownloadFolderKey:
+    """Issue #246: titles that would share one download folder."""
+
+    @pytest.mark.parametrize("a, b", [
+        ("A:B", "AB"),
+        ("Bleach", "BLEACH"),
+        ("Café", "Café"),  # composed vs decomposed accent
+        ("Title.", "Title"),
+    ])
+    def test_colliding_titles_share_key(self, a, b):
+        from memanga.downloader import _download_folder_key
+        assert _download_folder_key(a) == _download_folder_key(b)
+
+    def test_distinct_titles_differ(self):
+        from memanga.downloader import _download_folder_key
+        assert _download_folder_key("Bleach") != _download_folder_key("Naruto")
+
 
 # Chapter labels in order. A name must sort after every name in an earlier
 # group and before every name in a later group. Labels inside one group
@@ -460,6 +512,127 @@ class TestDownloadChapterPath:
         path = download_chapter(manga, chapter, out, "cbz", fake_state)
         rel = Path(path).resolve().relative_to(out.resolve())
         assert rel.parts[0] == "untitled"
+
+
+class TestDownloadChapterCancel:
+    def test_cancel_waits_for_started_page_workers(self, tmp_path,
+                                                   patch_get_scraper):
+        """Issue #246: page workers already running when the user cancels
+        finish before the temp directory is removed, so none writes into
+        a deleted (or re-created) folder."""
+        import threading
+        from PIL import Image
+        from memanga.downloader import download_chapter
+
+        scraper = patch_get_scraper
+        scraper._page_count = 4
+        gate = threading.Event()
+        cancel = threading.Event()
+        lock = threading.Lock()
+        started, finished, written = [], [], []
+
+        def download_image(url, path):
+            with lock:
+                started.append(url)
+            if not url.endswith("/0.jpg"):
+                gate.wait(5)
+            Image.new("RGB", (20, 30), "white").save(path)
+            with lock:
+                finished.append(url)
+                written.append(Path(path))
+            return True
+
+        def on_progress(done, total):
+            cancel.set()
+            threading.Timer(0.3, gate.set).start()
+
+        scraper.download_image = download_image
+        manga = {"title": "Bleach", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        chapter = types.SimpleNamespace(
+            number="1", title="", url="https://mock.test/c/1",
+            source="mock.test", source_url="https://mock.test/c/1",
+            is_backup=False,
+        )
+        try:
+            with pytest.raises(InterruptedError):
+                download_chapter(manga, chapter, tmp_path / "out", "cbz",
+                                 None, progress_callback=on_progress,
+                                 cancel_event=cancel, max_retries=0)
+            with lock:
+                assert sorted(finished) == sorted(started)
+            # Every page was written before the temp folder was removed,
+            # and the folder was not re-created by a late worker.
+            assert written
+            assert not any(p.parent.exists() for p in written)
+        finally:
+            gate.set()
+
+
+class TestDownloadChapterMetadata:
+    def test_epub_uses_manga_author_and_language(self, tmp_path,
+                                                 patch_get_scraper):
+        # Issue #246: EPUB metadata comes from the manga entry.
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from memanga.downloader import download_chapter
+        manga = {"title": "Bleach", "url": "https://mock.test/m",
+                 "source": "mock.test", "author": "Tite Kubo",
+                 "language": "ja"}
+        chapter = types.SimpleNamespace(
+            number="1", title="", url="https://mock.test/c/1",
+            source="mock.test", source_url="https://mock.test/c/1",
+            is_backup=False,
+        )
+        path = download_chapter(manga, chapter, tmp_path, "epub", None)
+        with zipfile.ZipFile(path) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+        dc = "{http://purl.org/dc/elements/1.1/}"
+        meta = opf.find("{http://www.idpf.org/2007/opf}metadata")
+        assert meta.find(f"{dc}creator").text == "Tite Kubo"
+        assert meta.find(f"{dc}language").text == "ja"
+
+    @staticmethod
+    def _chapter():
+        return types.SimpleNamespace(
+            number="1", title="", url="https://mock.test/c/1",
+            source="mock.test", source_url="https://mock.test/c/1",
+            is_backup=False,
+        )
+
+    def test_epub_language_undetermined_when_unknown(self, tmp_path,
+                                                     patch_get_scraper):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from memanga.downloader import download_chapter
+        manga = {"title": "Bleach", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        path = download_chapter(manga, self._chapter(), tmp_path, "epub", None)
+        with zipfile.ZipFile(path) as zf:
+            opf = ET.fromstring(zf.read("EPUB/content.opf"))
+        dc = "{http://purl.org/dc/elements/1.1/}"
+        meta = opf.find("{http://www.idpf.org/2007/opf}metadata")
+        assert meta.find(f"{dc}language").text == "und"
+
+    @pytest.mark.parametrize("direction, manga_flag", [
+        ("rtl", "YesAndRightToLeft"), (None, None),
+    ])
+    def test_cbz_uses_source_language_and_direction(
+            self, tmp_path, patch_get_scraper, direction, manga_flag):
+        # The chapter's source declares what it knows about its titles.
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from memanga.downloader import download_chapter
+        patch_get_scraper.content_language = "es"
+        patch_get_scraper.reading_direction = direction
+        manga = {"title": "Bleach", "url": "https://mock.test/m",
+                 "source": "mock.test"}
+        path = download_chapter(manga, self._chapter(), tmp_path, "cbz", None)
+        with zipfile.ZipFile(path) as zf:
+            root = ET.fromstring(zf.read("ComicInfo.xml"))
+        fields = {child.tag: child.text for child in root}
+        assert fields["LanguageISO"] == "es"
+        assert fields.get("Manga") == manga_flag
 
 
 class TestNamingTemplate:

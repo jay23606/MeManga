@@ -62,3 +62,19 @@ class TestBaseScraperInterface:
     def test_all_scrapers_import(self):
         # The mere act of import succeeded — no exception bubbled.
         assert self._all_modules()
+
+
+def test_no_bare_except_in_package():
+    """Issue #246: a bare ``except:`` also catches KeyboardInterrupt and
+    SystemExit, so Ctrl+C inside a scraper was swallowed."""
+    import ast
+    from pathlib import Path
+    import memanga
+    root = Path(memanga.__file__).resolve().parent
+    bare = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bare += [f"{path.relative_to(root)}:{node.lineno}"
+                 for node in ast.walk(tree)
+                 if isinstance(node, ast.ExceptHandler) and node.type is None]
+    assert bare == []

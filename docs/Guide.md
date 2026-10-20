@@ -711,6 +711,21 @@ MeManga supports seven formats:
 
 Image formats (JPG/PNG/WEBP) save chapters as folders: `downloads/Manga Title/Chapter 001/000.jpg, 001.jpg, ...`
 
+EPUB and CBZ files record the language of the pages, and CBZ files mark
+right-to-left manga for comic readers, only when MeManga knows them: from
+a source that serves one language or only right-to-left titles, or from
+the manga entry in `config.yaml`:
+
+```yaml
+manga:
+  - title: "Berserk"
+    language: en               # BCP 47 tag of the translation
+    reading_direction: rtl     # rtl, ltr or vertical
+```
+
+Otherwise CBZ files carry no language or reading direction, and EPUB
+files use the language `und` (undetermined).
+
 ### Change the default format
 
 Run the config wizard:
@@ -956,7 +971,9 @@ run add -t "Jujutsu Kaisen" -u "https://tcbonepiecechapters.com/mangas/13/jjk" -
 
 `--fallback-days` accepts whole numbers of days, 0 or greater (default: 2).
 Use `--fallback-days 0` to use the backup immediately. Negative values and
-non-integers are rejected before any config is saved.
+non-integers are rejected before any config is saved. It needs `--backup`
+in the same command; without a backup source the command fails instead of
+ignoring the delay.
 
 ### How fallback works
 

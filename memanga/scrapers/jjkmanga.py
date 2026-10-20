@@ -66,7 +66,7 @@ class JJKMangaScraper(BaseScraper):
         def sort_key(ch):
             try:
                 return float(ch.chapter_num)
-            except:
+            except Exception:
                 return 0
         
         chapters.sort(key=sort_key)

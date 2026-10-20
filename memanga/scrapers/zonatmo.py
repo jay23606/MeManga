@@ -40,6 +40,7 @@ class ZonaTMOScraper(BaseScraper):
 
     name = "zonatmo"
     base_url = "https://zonatmo.org"
+    content_language = "es"  # Spanish-language site
 
     # Series pages are /library/<type>/<id>/<slug>; reader pages are
     # /view_uploads/<upload_id>.

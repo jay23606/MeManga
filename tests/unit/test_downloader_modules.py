@@ -41,6 +41,7 @@ LEGACY_NAMES = {
     "_images_to_folder": "formats.folder",
     "_get_extension": "naming",
     "_sanitize_filename": "naming",
+    "_download_folder_key": "naming",
     "_format_chapter_number": "naming",
     "POST_PROCESSING_TIMEOUT": "post_processing",
     "_run_post_processing": "post_processing",

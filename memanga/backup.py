@@ -87,6 +87,14 @@ def validate_backup_contents(data: dict) -> Tuple[List[dict], Dict[str, dict]]:
             raise BackupVersionError(
                 f"Invalid backup: manga entry {index} has no title"
             )
+        # Issue #246: fields the downloader reads must have the shape
+        # MeManga writes, or they would land in config.yaml and fail later.
+        for key, (expected, ok) in _MANGA_FIELD_CHECKS.items():
+            if key in entry and not ok(entry[key]):
+                raise BackupVersionError(
+                    f"Invalid backup: manga entry {index} ({title!r}): "
+                    f"{key} must be {expected}"
+                )
 
     manga_state = data.get("state", {})
     if manga_state is None:
@@ -125,6 +133,27 @@ def _is_record_list(value: Any) -> bool:
 
 def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_source_list(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(s, str)
+        or (isinstance(s, dict) and isinstance(s.get("url", ""), str)
+            and isinstance(s.get("source") or "", str))
+        for s in value
+    )
+
+
+# Manga entry fields the downloader and update check read, with the
+# shape MeManga writes them (legacy ``source``/``url`` or a ``sources``
+# list of URLs or {"url", "source"} objects). Checked only when present;
+# other keys pass through as-is.
+_MANGA_FIELD_CHECKS: Dict[str, Tuple[str, Callable[[Any], bool]]] = {
+    "url": ("text", lambda v: isinstance(v, str)),
+    "source": ("text", lambda v: isinstance(v, str)),
+    "sources": ("a list of URLs or source objects", _is_source_list),
+    "fallback_delay_days": ("a whole number", _is_count),
+}
 
 
 # Per-manga state fields that merge_manga_state and the State readers
