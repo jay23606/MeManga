@@ -444,6 +444,15 @@ class TestSettingsPage:
             < titles["Scheduled Checks"]
         )
 
+    def test_frozen_build_disables_scheduled_checks(self, app_window, qapp, monkeypatch):
+        import memanga.gui.pages.settings as settings_module
+        from memanga.gui.pages.settings import SettingsPage
+
+        monkeypatch.setattr(settings_module.sys, "frozen", True, raising=False)
+        page = SettingsPage(None, app_window)
+
+        assert not page._cron_check.isEnabled()
+
     def test_template_preview_substitutes(self, app_window, qapp):
         page = app_window._pages["settings"]
         page._naming_entry.setText("X-{chapter}")

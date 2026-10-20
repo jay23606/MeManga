@@ -583,6 +583,14 @@ class SettingsPage(BasePage):
 
         self._cron_status_label = QLabel("")
         self._cron_status_label.setStyleSheet(f"font-size: {T.FONT_SIZE_XS}pt; color: {T.FG_MUTED};")
+        if getattr(sys, "frozen", False):
+            for widget in (self._cron_check, time_lbl, self._cron_time,
+                           install_btn, remove_btn, status_btn):
+                widget.setEnabled(False)
+            self._cron_status_label.setText(
+                "Scheduled checks are unavailable in the desktop build. "
+                "Use 'python -m memanga cron install' from a Python installation."
+            )
         f.addWidget(self._cron_status_label)
 
         f.addSpacing(T.PAD_XL)
