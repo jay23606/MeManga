@@ -394,6 +394,18 @@ class TestImagesToPdf:
         with pikepdf.open(out) as pdf:
             assert str(pdf.docinfo["/Author"]) == "MangaDex · Group A"
 
+    def test_undecodable_page_fails_instead_of_being_skipped(
+            self, jpg_paths, tmp_path):
+        """Issue #229: a bad page used to be skipped with a warning and the
+        PDF written anyway, so a chapter missing a page looked complete."""
+        from memanga.downloader import _images_to_pdf, DownloaderError
+        bad = tmp_path / "page_bad.jpg"
+        bad.write_bytes(b"<!DOCTYPE html><html>Just a moment...</html>")
+        out = tmp_path / "ch.pdf"
+        with pytest.raises(DownloaderError, match="page_bad.jpg"):
+            _images_to_pdf([jpg_paths[0], bad, jpg_paths[1]], out)
+        assert not out.exists()
+
 
 _OCF = "urn:oasis:names:tc:opendocument:xmlns:container"
 _OPF = "http://www.idpf.org/2007/opf"
@@ -810,6 +822,134 @@ class TestPartialChapterTolerance:
             download_chapter(
                 manga, _partial_chapter(), tmp_path, "pdf", fake_state,
                 max_retries=0, allow_partial=True, partial_threshold=100)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Invalid page bytes (issue #229) — a scraper that reports success but
+# saved an HTML block page or an empty body is a failed page.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _InvalidPageScraper(_PartialScraper):
+    """Reports success for every page, but writes ``bodies[idx]`` instead
+    of a JPEG for the chosen indexes. ``bad_attempts`` limits how many
+    calls per page return the bad body before a real image is served."""
+
+    def __init__(self, num_pages, bodies, bad_attempts=None):
+        super().__init__(num_pages, set())
+        self._bodies = bodies
+        self._bad_attempts = bad_attempts
+        self.calls: dict[int, int] = {}
+
+    def download_image(self, url, path):
+        idx = int(Path(url).stem[1:])
+        self.calls[idx] = self.calls.get(idx, 0) + 1
+        if idx in self._bodies and (self._bad_attempts is None
+                                    or self.calls[idx] <= self._bad_attempts):
+            Path(path).write_bytes(self._bodies[idx])
+            return True
+        return super().download_image(url, path)
+
+
+_HTML_PAGE = b"<!DOCTYPE html><html><body>Hotlinking not allowed</body></html>"
+
+
+def _truncated_jpeg() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(buf, "JPEG")
+    data = buf.getvalue()
+    return data[: len(data) // 2]
+
+
+# Valid JPEG signature, but no image a reader could open.
+_CORRUPT_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+_TRUNCATED_JPEG = _truncated_jpeg()
+
+_BAD_BODIES = pytest.mark.parametrize(
+    "body", [_HTML_PAGE, b"", _CORRUPT_JPEG, _TRUNCATED_JPEG],
+    ids=["html", "empty", "corrupt-jpeg", "truncated-jpeg"])
+
+
+def _decodes(data: bytes) -> bool:
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+        return True
+    except Exception:
+        return False
+
+
+class TestInvalidPageBytes:
+    _manga = {"title": "X", "url": "https://cdn.test/x", "source": "cdn.test"}
+
+    def _patch(self, monkeypatch, scraper):
+        import memanga.downloader as dl
+        monkeypatch.setattr(dl.chapter, "get_scraper", lambda d: scraper)
+        monkeypatch.setattr(dl.chapter.time, "sleep", lambda s: None)
+
+    @pytest.mark.parametrize("fmt", ["pdf", "cbz", "zip", "epub", "jpg"])
+    @_BAD_BODIES
+    def test_invalid_page_fails_the_chapter(
+            self, tmp_path, fake_state, monkeypatch, fmt, body):
+        from memanga.downloader import download_chapter, DownloaderError
+        self._patch(monkeypatch, _InvalidPageScraper(4, {2: body}))
+        with pytest.raises(DownloaderError) as exc:
+            download_chapter(self._manga, _partial_chapter(), tmp_path, fmt,
+                             fake_state, max_retries=0)
+        assert exc.value.failed_pages == [3]
+        assert exc.value.total_pages == 4
+        # Nothing was written for the chapter.
+        assert not any(p.is_file() for p in tmp_path.rglob("*"))
+
+    @_BAD_BODIES
+    def test_invalid_page_is_retried(self, tmp_path, fake_state, monkeypatch,
+                                     body):
+        from memanga.downloader import download_chapter
+        scraper = _InvalidPageScraper(3, {1: body}, bad_attempts=1)
+        self._patch(monkeypatch, scraper)
+        out = download_chapter(self._manga, _partial_chapter(), tmp_path,
+                               "cbz", fake_state, max_retries=2)
+        assert scraper.calls[1] == 2
+        with zipfile.ZipFile(out) as zf:
+            pages = [n for n in zf.namelist() if n.startswith("page_")]
+            assert len(pages) == 3
+            assert all(_decodes(zf.read(n)) for n in pages)
+
+    @pytest.mark.parametrize("body", [_HTML_PAGE, _CORRUPT_JPEG],
+                             ids=["html", "corrupt-jpeg"])
+    def test_invalid_page_counts_toward_partial_tolerance(
+            self, tmp_path, fake_state, monkeypatch, body):
+        from memanga.downloader import download_chapter
+        self._patch(monkeypatch, _InvalidPageScraper(10, {4: body}))
+        seen = {}
+        out = download_chapter(
+            self._manga, _partial_chapter(), tmp_path, "zip", fake_state,
+            max_retries=0, allow_partial=True, partial_threshold=10,
+            on_partial=lambda failed, total: seen.update(failed=failed,
+                                                         total=total))
+        assert seen == {"failed": [5], "total": 10}
+        with zipfile.ZipFile(out) as zf:
+            pages = [n for n in zf.namelist() if n.startswith("page_")]
+            assert len(pages) == 9
+            assert all(_decodes(zf.read(n)) for n in pages)
+
+    def test_invalid_epub_cover_falls_back_to_first_page(
+            self, tmp_path, fake_state, monkeypatch):
+        from memanga.downloader import download_chapter
+
+        class _BadCoverScraper(_PartialScraper):
+            def download_image(self, url, path):
+                if "cover" in url:
+                    Path(path).write_bytes(_HTML_PAGE)
+                    return True
+                return super().download_image(url, path)
+
+        self._patch(monkeypatch, _BadCoverScraper(2, set()))
+        manga = dict(self._manga, cover_url="https://cdn.test/cover.jpg")
+        out = download_chapter(manga, _partial_chapter(), tmp_path, "epub",
+                               fake_state, max_retries=0)
+        with zipfile.ZipFile(out) as zf:
+            assert _decodes(zf.read("EPUB/images/cover.jpg"))
 
 
 # ─────────────────────────────────────────────────────────────────────────

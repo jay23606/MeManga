@@ -8,13 +8,27 @@ sniffer shared with the GUI cover fetch.
 
 from __future__ import annotations
 
+import io
 import time
 import pytest
 import requests
+from PIL import Image
 
 from memanga.scrapers.base import (
-    BaseScraper, Chapter, Manga, _retry, is_retryable_request_error, looks_like_image,
+    BaseScraper, Chapter, Manga, _retry, is_image_file, is_retryable_request_error,
+    looks_like_image,
 )
+
+
+
+def _image_bytes(fmt: str) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (200, 40, 40)).save(buf, fmt)
+    return buf.getvalue()
+
+
+_JPEG = _image_bytes("JPEG")
+_PNG = _image_bytes("PNG")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -236,10 +250,51 @@ class TestDownloadImage:
     def test_writes_to_disk_on_success(self, monkeypatch, tmp_path, fake_response):
         s = _DummyScraper()
         monkeypatch.setattr(s, "_request",
-                             lambda *a, **k: fake_response(content=b"data"))
+                             lambda *a, **k: fake_response(content=_JPEG))
         ok = s.download_image("https://x", tmp_path / "p.jpg")
         assert ok is True
-        assert (tmp_path / "p.jpg").read_bytes() == b"data"
+        assert (tmp_path / "p.jpg").read_bytes() == _JPEG
+
+    @pytest.mark.parametrize("body,ctype", [
+        (b"<!DOCTYPE html><html><body>Just a moment...</body></html>",
+         "text/html; charset=UTF-8"),
+        # The header is not trusted: markup labeled as an image is still markup.
+        (b"<html>hotlink blocked</html>", "image/jpeg"),
+        (b"", "image/jpeg"),
+        (b"", ""),
+    ])
+    def test_non_image_body_is_a_failed_page(self, monkeypatch, tmp_path,
+                                             fake_response, body, ctype):
+        # Issue #229: a 200 block page or empty body must not be saved
+        # as page bytes and reported as success.
+        s = _DummyScraper()
+        monkeypatch.setattr(s, "_request", lambda *a, **k: fake_response(
+            content=body, headers={"Content-Type": ctype}))
+        path = tmp_path / "page_007.jpg"
+        assert s.download_image("https://x", path) is False
+        assert not path.exists()
+
+    def test_image_without_image_content_type_is_kept(self, monkeypatch, tmp_path,
+                                                      fake_response):
+        # TIFF has no sniffed magic number and some CDNs label images
+        # application/octet-stream; Pillow still recognises the bytes.
+        s = _DummyScraper()
+        tiff = _image_bytes("TIFF")
+        monkeypatch.setattr(s, "_request", lambda *a, **k: fake_response(
+            content=tiff, headers={"Content-Type": "application/octet-stream"}))
+        path = tmp_path / "p.tif"
+        assert s.download_image("https://x", path) is True
+        assert path.read_bytes() == tiff
+
+    def test_non_image_body_removes_stale_file(self, monkeypatch, tmp_path,
+                                               fake_response):
+        s = _DummyScraper()
+        path = tmp_path / "page_007.jpg"
+        path.write_bytes(_JPEG)
+        monkeypatch.setattr(s, "_request", lambda *a, **k: fake_response(
+            content=b"<html>hotlink blocked</html>"))
+        assert s.download_image("https://x", path) is False
+        assert not path.exists()
 
     def test_failure_returns_false(self, monkeypatch, tmp_path):
         s = _DummyScraper()
@@ -296,3 +351,78 @@ class TestLooksLikeImage:
     ])
     def test_rejects_non_images(self, body, ctype):
         assert looks_like_image(body, ctype) is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# is_image_file — saved-page check used by the downloader (issue #229)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestIsImageFile:
+    @pytest.mark.parametrize("fmt", ["JPEG", "PNG", "GIF", "BMP", "TIFF"])
+    def test_decodable_images_pass(self, tmp_path, fmt):
+        p = tmp_path / "page"
+        p.write_bytes(_image_bytes(fmt))
+        assert is_image_file(p) is True
+
+    def test_webp_passes(self, tmp_path):
+        from PIL import features
+        if not features.check("webp"):
+            pytest.skip("Pillow built without WebP")
+        p = tmp_path / "p.webp"
+        p.write_bytes(_image_bytes("WEBP"))
+        assert is_image_file(p) is True
+
+    @pytest.mark.parametrize("body", [
+        b"",
+        b"<!DOCTYPE html><html><body>Forbidden</body></html>",
+        b"<html>blocked</html>",
+    ])
+    def test_rejects_non_image_bytes(self, tmp_path, body):
+        p = tmp_path / "p.jpg"
+        p.write_bytes(body)
+        assert is_image_file(p) is False
+
+    @pytest.mark.parametrize("body", [
+        b"\xff\xd8\xff\xe0" + b"\x00" * 16,   # JPEG signature, no image
+        _JPEG[: len(_JPEG) // 2],              # body cut short
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,  # PNG signature, no image
+        _PNG[:-20],                            # IDAT/IEND cut off
+    ], ids=["jpeg-signature-only", "jpeg-truncated",
+            "png-signature-only", "png-truncated"])
+    def test_rejects_corrupt_bytes_behind_a_valid_signature(self, tmp_path, body):
+        # Issue #229: a signature alone is not an image; CBZ/ZIP would
+        # store these bytes verbatim as a page nobody can open.
+        p = tmp_path / "p.img"
+        p.write_bytes(body)
+        assert is_image_file(p) is False
+
+    _AVIF_SIGNATURE = b"\x00\x00\x00 ftypavifmif1" + b"\x00" * 8
+
+    def test_format_without_a_decoder_is_judged_by_signature(
+            self, tmp_path, monkeypatch):
+        # A Pillow build without AVIF support cannot decode the page, so
+        # its signature is all there is to go on.
+        from PIL import features
+        try:
+            from PIL import AvifImagePlugin
+            monkeypatch.setattr(AvifImagePlugin, "SUPPORTED", False)
+        except ImportError:
+            pass  # older Pillow: no AVIF plugin at all
+        real = features.check_module
+        monkeypatch.setattr(features, "check_module",
+                            lambda name: name != "avif" and real(name))
+        p = tmp_path / "p.avif"
+        p.write_bytes(self._AVIF_SIGNATURE)
+        assert is_image_file(p) is True
+
+    def test_format_with_a_decoder_must_decode(self, tmp_path):
+        from PIL import features
+        if "avif" not in features.modules or not features.check_module("avif"):
+            pytest.skip("Pillow built without AVIF")
+        p = tmp_path / "p.avif"
+        p.write_bytes(self._AVIF_SIGNATURE)
+        assert is_image_file(p) is False
+
+    def test_missing_file(self, tmp_path):
+        assert is_image_file(tmp_path / "nope.jpg") is False

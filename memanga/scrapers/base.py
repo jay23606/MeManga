@@ -2,6 +2,7 @@
 Base scraper class and data models
 """
 
+import io
 import re
 import time
 import logging
@@ -43,6 +44,70 @@ def looks_like_image(content: bytes, content_type: str = "") -> bool:
         return True
     ctype = (content_type or "").split(";")[0].strip().lower()
     return ctype.startswith("image/")
+
+
+def _identifies_as_image(content: bytes) -> bool:
+    """Header-only check on raw bytes: a sniffed magic number, or a
+    format Pillow recognises (TIFF, ...). Ignores any Content-Type."""
+    if looks_like_image(content):
+        return True
+    if not content:
+        return False
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(content)):
+            return True
+    except Exception:
+        return False
+
+
+def _no_decoder_for(data: bytes) -> bool:
+    """True for a sniffed format this Pillow build has no decoder for
+    (AVIF/WEBP need optional libraries, HEIC a plugin). Such pages can
+    only be judged by their signature."""
+    from PIL import Image, features
+
+    def has_module(name):
+        return name in features.modules and bool(features.check_module(name))
+
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return not has_module("webp")
+    if data[4:12] == b"ftypavif":
+        return not has_module("avif")
+    if data[4:12] == b"ftypheic":
+        return "HEIF" not in Image.OPEN
+    return False
+
+
+def is_image_file(path) -> bool:
+    """True when the file at ``path`` holds a decodable image.
+
+    The authoritative check for a saved page (issue #229). Judges the
+    bytes only, never a response header, so an HTML block page served
+    as ``image/jpeg`` is rejected, and the whole image is decoded, so a
+    truncated or corrupt body behind a valid signature is rejected too.
+    A sniffed format this Pillow build cannot decode is accepted on its
+    signature alone.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return False
+    if not data:
+        return False
+    from PIL import Image, UnidentifiedImageError
+    try:
+        # verify() checks structure (e.g. PNG CRCs) but leaves the image
+        # unusable, so a second open does the full decode.
+        with Image.open(io.BytesIO(data)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+        return True
+    except UnidentifiedImageError:
+        return looks_like_image(data) and _no_decoder_for(data)
+    except Exception:
+        return False
 
 
 def is_retryable_request_error(error: BaseException) -> bool:
@@ -229,9 +294,18 @@ class BaseScraper(ABC):
         """
         try:
             response = self._request(url)
+            content = response.content
+            if not _identifies_as_image(content):
+                # Block pages and empty bodies are failed pages, not
+                # images (issue #229); don't leave an older file behind.
+                # Judged on the bytes, not Content-Type; the downloader
+                # still decodes each saved page with is_image_file().
+                Path(path).unlink(missing_ok=True)
+                logger.debug(f"Failed to download {url}: response body is not an image")
+                return False
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "wb") as f:
-                f.write(response.content)
+                f.write(content)
             return True
         except Exception as e:
             logger.debug(f"Failed to download {url}: {e}")

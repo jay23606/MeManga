@@ -353,7 +353,8 @@ class TestImageReports:
     def test_mangadex_org_images_are_not_reported(self, scraper, monkeypatch, tmp_path):
         response = requests.Response()
         response.status_code = 200
-        response._content = b"image bytes"
+        # Goes through BaseScraper.download_image, which checks the body.
+        response._content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
         monkeypatch.setattr(scraper.session, "get", lambda *a, **k: response)
         reports = []
         monkeypatch.setattr(requests, "post", lambda url, **k: reports.append(k))
