@@ -917,7 +917,7 @@ class TestSharedChapterPipeline:
             "primary.test", "https://primary.test/vs")
 
     def _run(self, worker, event_bus, state, monkeypatch, fake_dl,
-             fake_send=None, **kwargs):
+             fake_send=None, output_format="pdf", **kwargs):
         """Queue one chapter and collect every event it publishes."""
         import time
         import memanga.downloader as dl
@@ -932,11 +932,12 @@ class TestSharedChapterPipeline:
         events = []
         for name in ("download_started", "download_progress",
                      "download_complete", "download_error",
-                     "download_cancelled", "kindle_sent", "kindle_error"):
+                     "download_cancelled", "kindle_sent", "kindle_error",
+                     "kindle_skipped"):
             event_bus.subscribe(name, lambda d, n=name: events.append((n, d)))
 
         worker.download_chapter(self._MANGA, self._chapter(),
-                                "/tmp/out", "pdf", state, **kwargs)
+                                "/tmp/out", output_format, state, **kwargs)
 
         terminal = {"download_complete", "download_error", "download_cancelled"}
         deadline = time.monotonic() + 5.0
@@ -998,9 +999,39 @@ class TestSharedChapterPipeline:
             kindle_cfg=dict(self._KINDLE), delete_after_send=True)
 
         assert self._names(events)[-2:] == ["kindle_sent", "download_complete"]
+        assert "kindle_skipped" not in self._names(events)
         assert sent[0]["pdf_path"] == pdf
         assert sent[0]["app_password"] == "secret"
         assert not pdf.exists()
+        assert state.is_chapter_downloaded("Vinland Saga", "71")
+
+    @pytest.mark.parametrize("fmt", ["jpg", "png", "webp"])
+    def test_image_folder_skips_kindle_with_event(
+            self, worker, event_bus, state, monkeypatch, tmp_path, fmt):
+        # Issue #340: image formats save a folder of pages. Like the CLI,
+        # the GUI skips Kindle delivery and says so, instead of staying
+        # silent; the folder and the chapter record are kept.
+        folder = tmp_path / "Vinland Saga" / "Chapter 71"
+        folder.mkdir(parents=True)
+        (folder / f"001.{fmt}").write_bytes(b"img")
+        sent = []
+
+        events = self._run(
+            worker, event_bus, state, monkeypatch,
+            lambda manga, chapter, *a, **k: folder,
+            lambda **kw: sent.append(kw),
+            output_format=fmt,
+            kindle_cfg=dict(self._KINDLE), delete_after_send=True)
+
+        assert self._names(events)[-2:] == ["kindle_skipped", "download_complete"]
+        assert events[-2][1] == {
+            "task_id": "Vinland Saga:71", "title": "Vinland Saga",
+            "chapter": "71", "path": str(folder),
+        }
+        assert "kindle_sent" not in self._names(events)
+        assert "kindle_error" not in self._names(events)
+        assert sent == []
+        assert (folder / f"001.{fmt}").exists()
         assert state.is_chapter_downloaded("Vinland Saga", "71")
 
     def test_kindle_failure_keeps_file_and_chapter(

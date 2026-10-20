@@ -78,6 +78,7 @@ class MeMangaApp(QMainWindow):
         self.events.subscribe("check_complete", self._on_check_complete)
         self.events.subscribe("check_error", self._on_check_error)
         self.events.subscribe("kindle_sent", self._on_kindle_sent)
+        self.events.subscribe("kindle_skipped", self._on_kindle_skipped)
 
         # Window setup
         self.setWindowTitle(f"MeManga v{__version__}")
@@ -529,6 +530,18 @@ class MeMangaApp(QMainWindow):
 
     def _on_kindle_sent(self, data):
         self.app_state.add_notification("kindle", f"Sent to Kindle: {data.get('path', '').split('/')[-1]}")
+        self.events.publish("notification_added", {})
+
+    def _on_kindle_skipped(self, data):
+        # Issue #340: image formats save a folder of pages, which can't
+        # be emailed. The chapter is still downloaded; say why no book
+        # reaches the Kindle.
+        self.app_state.add_notification(
+            "warn",
+            f"Not sent to Kindle: {data.get('title', '')} Ch. {data.get('chapter', '')} "
+            "— image folders (JPG/PNG/WEBP) can't be emailed. "
+            "Choose PDF, EPUB, CBZ or ZIP in Settings to send to Kindle.",
+        )
         self.events.publish("notification_added", {})
 
     # ---- First-launch source seeding ----
