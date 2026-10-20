@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Mapping
 
+from .config import default_config_dir
 from .perf import timed
 from .persist import atomic_write_text, preserve_corrupt
 from .state_stores import (ActivityStore, BackupStore, CatalogueStore,
@@ -62,7 +63,7 @@ class State:
         if config_dir:
             self.config_dir = Path(config_dir)
         else:
-            self.config_dir = Path.home() / ".config" / "memanga"
+            self.config_dir = default_config_dir()
 
         self.state_path = self.config_dir / "state.json"
         self.backup_path = self.config_dir / "state.json.bak"

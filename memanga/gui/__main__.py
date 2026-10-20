@@ -10,8 +10,15 @@ from pathlib import Path
 
 
 def _config_dir() -> Path:
-    """Directory the app uses for state, logs and crash reports."""
-    return Path.home() / ".config" / "memanga"
+    """Directory the app uses for state, logs and crash reports.
+
+    Selected like the CLI and launch_gui() do (issue #249):
+    ``$MEMANGA_CONFIG_DIR``, else the platform default. Resolving the
+    default here also moves a legacy ~/.config/memanga before any log
+    is written.
+    """
+    from memanga.config import selected_config_dir
+    return selected_config_dir()
 
 
 def _playwright_browsers_dir() -> Path:

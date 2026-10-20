@@ -35,7 +35,7 @@ def fake_qt(qapp, monkeypatch):
     import memanga.gui as gui
     import memanga.gui.app as app_mod
 
-    calls = {"critical": [], "warning": [], "windows": []}
+    calls = {"critical": [], "warning": [], "windows": [], "explicit": []}
     real_app = PySide6.QtWidgets.QApplication
 
     class FakeApplication(metaclass=_forwarding(real_app)):
@@ -68,8 +68,10 @@ def fake_qt(qapp, monkeypatch):
             fn()
 
     class FakeWindow:
-        def __init__(self, config=None, app_state=None):
+        def __init__(self, config=None, app_state=None,
+                     explicit_config_dir=None):
             calls["windows"].append((config, app_state))
+            calls["explicit"].append(explicit_config_dir)
 
         def show(self):
             pass
@@ -182,3 +184,173 @@ def test_window_holds_the_config_dir_lock(cfg_dir, fake_qt, lock_holder):
     assert _launch() == 0
     assert len(fake_qt["windows"]) == 1
     assert not lock_holder.can_lock(cfg_dir)
+
+
+def test_direct_launch_uses_the_cli_default_folder(isolated_home, fake_qt,
+                                                   monkeypatch):
+    """Issue #249: started on its own, the GUI picks (and moves to) the
+    same platform folder the CLI uses by default."""
+    from memanga import config as config_mod
+    legacy = isolated_home / ".config" / "memanga"
+    native = isolated_home / "platform" / "memanga"
+    monkeypatch.setattr(config_mod, "platform_config_dir", lambda: native)
+    (legacy / "config.yaml").write_text(
+        "manga:\n- title: Blue Lock\n  url: https://example.org/b\n",
+        encoding="utf-8")
+    assert _launch() == 0
+    config, state = fake_qt["windows"][0]
+    assert config.config_dir == state.config_dir == native
+    assert config.get("manga")[0]["title"] == "Blue Lock"
+    assert config_mod.default_config_dir() == native
+    assert (legacy / config_mod.MOVED_NOTE).exists()
+
+
+def test_direct_launch_uses_env_config_dir(isolated_home, fake_qt,
+                                           monkeypatch, tmp_path, lock_holder):
+    """Issue #249: started on its own, the GUI selects like the CLI:
+    $MEMANGA_CONFIG_DIR before the platform folder, and an explicit
+    directory never moves the legacy folder."""
+    from memanga import config as config_mod
+    legacy = isolated_home / ".config" / "memanga"
+    native = isolated_home / "platform" / "memanga"
+    monkeypatch.setattr(config_mod, "platform_config_dir", lambda: native)
+    (legacy / "state.json").write_text("{}", encoding="utf-8")
+    root = tmp_path / "from-env"
+    monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(root))
+    assert _launch() == 0
+    config, state = fake_qt["windows"][0]
+    assert config.config_dir == state.config_dir == root
+    assert fake_qt["explicit"] == [root]
+    assert not lock_holder.can_lock(root)
+    assert (legacy / "state.json").exists()
+    assert not native.exists()
+
+
+def test_explicit_argument_wins_over_env(isolated_home, fake_qt, monkeypatch,
+                                         tmp_path):
+    from memanga.gui import launch_gui
+    monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(tmp_path / "from-env"))
+    root = tmp_path / "chosen"
+    with pytest.raises(SystemExit) as exc:
+        launch_gui(explicit_config_dir=root)
+    assert exc.value.code == 0
+    config, state = fake_qt["windows"][0]
+    assert config.config_dir == state.config_dir == root
+    assert fake_qt["explicit"] == [root]
+    assert not (tmp_path / "from-env").exists()
+
+
+def test_cli_explicit_dir_reaches_the_window(cfg_dir, fake_qt, tmp_path):
+    """`memanga --config-dir DIR --gui`: the loaded objects and the
+    explicit choice both reach the window."""
+    from memanga.config import Config
+    from memanga.gui import launch_gui
+    from memanga.state import State
+    root = tmp_path / "portable"
+    config = Config(root, tolerate_errors=True)
+    state = State(root)
+    with pytest.raises(SystemExit) as exc:
+        launch_gui(config=config, state=state, explicit_config_dir=root)
+    assert exc.value.code == 0
+    assert fake_qt["windows"] == [(config, state)]
+    assert fake_qt["explicit"] == [root]
+
+
+class TestMoveRaceWithDirectGui:
+    """Issue #249, direct GUI launch: the window picks the legacy folder
+    while another process holds its migration lock, which then renames it
+    before the GUI takes its lock. The GUI must never load or save in the
+    recreated, orphaned legacy folder. Counterpart of
+    tests/unit/test_config_dir.py::TestMoveRaceWithCommand."""
+
+    @pytest.fixture
+    def dirs(self, isolated_home, monkeypatch):
+        from memanga import config as config_mod
+        legacy = isolated_home / ".config" / "memanga"
+        native = isolated_home / "platform" / "memanga"
+        monkeypatch.setattr(config_mod, "platform_config_dir", lambda: native)
+        (legacy / "config.yaml").write_text(
+            "manga:\n- title: Blue Lock\n  url: https://example.org/b\n",
+            encoding="utf-8")
+        (legacy / "state.json").write_text("{}", encoding="utf-8")
+        return legacy, native
+
+    @staticmethod
+    def _stale_selection(monkeypatch, legacy, native, after_move=None):
+        """First default_config_dir() call returns legacy, then "the other
+        process" finishes its move; later calls resolve normally."""
+        import os
+        from memanga import config as config_mod
+        real = config_mod.default_config_dir
+        calls = []
+
+        def selected_then_moved():
+            calls.append(1)
+            if len(calls) == 1:
+                # The mover creates the parent first (migrate_legacy_config_dir).
+                native.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(legacy, native)
+                legacy.mkdir()
+                (legacy / config_mod.MOVED_NOTE).write_text("moved", encoding="utf-8")
+                if after_move is not None:
+                    after_move()
+                return legacy
+            return real()
+
+        monkeypatch.setattr(config_mod, "default_config_dir", selected_then_moved)
+        return calls
+
+    def test_window_loads_and_locks_platform_folder(self, dirs, fake_qt,
+                                                    monkeypatch, lock_holder):
+        legacy, native = dirs
+        calls = self._stale_selection(monkeypatch, legacy, native)
+
+        assert _launch() == 0
+
+        assert len(calls) == 2
+        config, state = fake_qt["windows"][0]
+        assert config.config_dir == state.config_dir == native
+        assert config.get("manga")[0]["title"] == "Blue Lock"
+        assert fake_qt["explicit"] == [None]
+        assert not lock_holder.can_lock(native)
+        # The legacy lock was let go and nothing was saved there.
+        assert lock_holder.can_lock(legacy)
+        config.set("delivery.output_format", "epub")
+        config.save()
+        assert "epub" in (native / "config.yaml").read_text(encoding="utf-8")
+        assert not (legacy / "config.yaml").exists()
+        assert not (legacy / "state.json").exists()
+
+    def test_busy_platform_folder_shows_error_and_loads_nothing(
+            self, dirs, fake_qt, monkeypatch, lock_holder):
+        """The mover still holds the platform folder: the window is not
+        opened and nothing is written anywhere."""
+        legacy, native = dirs
+        before = (legacy / "config.yaml").read_text(encoding="utf-8")
+        self._stale_selection(monkeypatch, legacy, native,
+                              after_move=lambda: lock_holder.hold(native))
+
+        assert _launch() == 1
+
+        assert "already running" in fake_qt["critical"][0]
+        assert fake_qt["windows"] == []
+        assert (native / "config.yaml").read_text(encoding="utf-8") == before
+        assert not (legacy / "config.yaml").exists()
+        assert not (legacy / "state.json").exists()
+
+    def test_explicit_legacy_path_is_kept(self, dirs, fake_qt, monkeypatch):
+        """$MEMANGA_CONFIG_DIR naming the old folder is a choice, not a
+        stale default: it is used even though the platform folder has
+        data."""
+        import os
+        legacy, native = dirs
+        native.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(legacy, native)
+        legacy.mkdir()
+        monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(legacy))
+
+        assert _launch() == 0
+
+        config, state = fake_qt["windows"][0]
+        assert config.config_dir == state.config_dir == legacy
+        assert fake_qt["explicit"] == [legacy]

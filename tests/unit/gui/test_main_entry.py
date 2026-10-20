@@ -86,3 +86,32 @@ class TestConfigurePlaywrightBrowsers:
         d = ns["_playwright_browsers_dir"]()
         assert d.name == "ms-playwright"
         assert d.is_absolute()
+
+
+def test_log_dir_is_the_shared_default_config_dir(isolated_home, monkeypatch):
+    """Issue #249: runtime.log and crash.log go to the folder the GUI and
+    CLI use, after a legacy ~/.config/memanga was moved there."""
+    from memanga import config as config_mod
+    legacy = isolated_home / ".config" / "memanga"
+    native = isolated_home / "platform" / "memanga"
+    monkeypatch.setattr(config_mod, "platform_config_dir", lambda: native)
+    (legacy / "state.json").write_text("{}", encoding="utf-8")
+
+    assert _entry_helpers()["_config_dir"]() == native
+    assert (native / "state.json").exists()
+
+
+def test_log_dir_follows_env_config_dir(isolated_home, monkeypatch, tmp_path):
+    """Issue #249: with $MEMANGA_CONFIG_DIR the logs go to that directory,
+    like Config and State, and the legacy folder is not moved."""
+    from memanga import config as config_mod
+    legacy = isolated_home / ".config" / "memanga"
+    native = isolated_home / "platform" / "memanga"
+    monkeypatch.setattr(config_mod, "platform_config_dir", lambda: native)
+    (legacy / "state.json").write_text("{}", encoding="utf-8")
+    root = tmp_path / "from-env"
+    monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(root))
+
+    assert _entry_helpers()["_config_dir"]() == root
+    assert (legacy / "state.json").exists()
+    assert not native.exists()

@@ -650,6 +650,73 @@ class TestSettingsPage:
         assert f'"{python}" -m memanga check --auto --quiet' in command
         assert app_window.config.get("cron.enabled") is True
 
+    def test_install_cron_unix_keeps_explicit_config_dir(
+            self, app_window, qapp, monkeypatch, tmp_path):
+        """#249: a window started with --config-dir/$MEMANGA_CONFIG_DIR
+        schedules the check on that directory, like `cron install`."""
+        import shlex
+        import sys
+
+        from memanga.gui.pages import settings as settings_mod
+
+        root = tmp_path / "My Manga cfg"
+        monkeypatch.setattr(app_window, "explicit_config_dir", root)
+        monkeypatch.setattr(settings_mod, "source_checkout_root",
+                            lambda: None)
+        submitted = self._fake_crontab(monkeypatch, "")
+        app_window._pages["settings"]._install_cron_unix("06", "30")
+
+        line, = [l for l in submitted["crontab"].splitlines() if l]
+        command = shlex.split(line.split("* * * ", 1)[1], comments=True)
+        i = command.index("memanga")
+        assert command[i + 1:i + 4] == ["--config-dir", root.as_posix(), "check"]
+
+    def test_install_cron_windows_keeps_explicit_config_dir(
+            self, app_window, qapp, monkeypatch, tmp_path):
+        import subprocess
+        import sys
+
+        from memanga.cron import build_task_command
+        from memanga.gui.pages import settings as settings_mod
+
+        python = r"C:\Program Files\Python312\python.exe"
+        monkeypatch.setattr(sys, "executable", python)
+        root = tmp_path / "My Manga cfg"
+        monkeypatch.setattr(app_window, "explicit_config_dir", root)
+        calls = []
+
+        def _fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(settings_mod.subprocess, "run", _fake_run)
+        app_window._pages["settings"]._install_cron_windows("06:30")
+
+        create, = [c for c in calls if c[1] == "/Create"]
+        command = create[create.index("/TR") + 1]
+        assert command == build_task_command(
+            python, config_dir=root,
+            source_root=settings_mod.source_checkout_root())
+        assert "--config-dir" in command
+
+    def test_window_without_objects_uses_explicit_dir(self, qapp, theme,
+                                                      tmp_path):
+        """#249: MeMangaApp built with only an explicit directory loads
+        config and state there, never from the default."""
+        from memanga.gui.app import MeMangaApp
+        root = tmp_path / "portable"
+        w = MeMangaApp(explicit_config_dir=root)
+        try:
+            assert w.config.config_dir == w.app_state.config_dir == root
+            w.reload_data()
+            assert w.config.config_dir == w.app_state.config_dir == root
+        finally:
+            try:
+                w.worker.shutdown()
+            except Exception:
+                pass
+            w.close()
+
     def test_install_cron_unix_source_checkout_runs_from_checkout(
             self, app_window, qapp, monkeypatch, tmp_path):
         """#232: a requirements-only checkout venv needs the checkout as

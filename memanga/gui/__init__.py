@@ -378,17 +378,23 @@ def _startup_problem(config, state):
     return None
 
 
-def launch_gui(config=None, state=None):
+def launch_gui(config=None, state=None, explicit_config_dir=None):
     """Launch the MeManga GUI application.
 
     ``config`` and ``state`` are the already loaded objects when the CLI
-    starts the GUI; otherwise they are loaded here.
+    starts the GUI; otherwise they are loaded here, in the directory the
+    CLI would select (issue #249): ``explicit_config_dir``, else
+    ``$MEMANGA_CONFIG_DIR``, else the platform default.
+    ``explicit_config_dir`` is the directory chosen with ``--config-dir``
+    or ``$MEMANGA_CONFIG_DIR`` (None for the default), so the daily check
+    set up from Settings runs on the same directory.
     """
     from PySide6.QtWidgets import QApplication, QMessageBox
     from PySide6.QtCore import QTimer
     from .app import MeMangaApp
     from . import theme as T
-    from ..config import Config, default_config_dir
+    from ..config import (Config, default_config_dir, default_root_moved,
+                          explicit_config_dir as _explicit)
     from ..process_lock import ConfigDirBusy, ConfigDirLock, ConfigDirLockError
     from ..state import State
 
@@ -415,18 +421,41 @@ def launch_gui(config=None, state=None):
     # them for the whole session, so it holds the config directory lock
     # until the process exits. Taken before loading; under `memanga --gui`
     # the CLI already holds it and this only joins that lock.
-    config_dir = config.config_dir if config is not None else default_config_dir()
-    lock = ConfigDirLock(config_dir)
-    try:
-        lock.acquire()
-    except (ConfigDirBusy, ConfigDirLockError) as e:
-        QMessageBox.critical(None, "MeManga", _lock_problem(e))
-        sys.exit(1)
+    if config is not None:
+        config_dir = config.config_dir
+    else:
+        explicit_config_dir = _explicit(explicit_config_dir)
+        config_dir = explicit_config_dir or default_config_dir()
+    def _lock(directory):
+        lock = ConfigDirLock(directory)
+        try:
+            lock.acquire()
+        except (ConfigDirBusy, ConfigDirLockError) as e:
+            QMessageBox.critical(None, "MeManga", _lock_problem(e))
+            sys.exit(1)
+        return lock
+
+    lock = _lock(config_dir)
+    # Issue #249: another process may have moved the legacy folder to the
+    # platform folder between default_config_dir() and the lock, so this
+    # lock is on a recreated, empty legacy folder. Switch to the platform
+    # folder before loading anything, as the CLI does.
+    if config is None and explicit_config_dir is None and default_root_moved(config_dir):
+        lock.release()
+        moved_from = config_dir
+        config_dir = default_config_dir()
+        if default_root_moved(config_dir):
+            QMessageBox.critical(
+                None, "MeManga",
+                f"MeManga's folder was just moved from:\n{moved_from}\n\n"
+                "Nothing was changed. Start MeManga again.")
+            sys.exit(1)
+        lock = _lock(config_dir)
 
     if config is None:
-        config = Config(tolerate_errors=True)
+        config = Config(config_dir, tolerate_errors=True)
     if state is None:
-        state = State()
+        state = State(config_dir)
     problem = _startup_problem(config, state)
     if problem:
         QMessageBox.critical(None, "MeManga", problem)
@@ -434,7 +463,8 @@ def launch_gui(config=None, state=None):
 
     _ensure_browsers()
 
-    window = MeMangaApp(config=config, app_state=state)
+    window = MeMangaApp(config=config, app_state=state,
+                        explicit_config_dir=explicit_config_dir)
     # NOTE: don't subscribe `lambda: T.apply(qapp)` here.
     # `T.set_theme(name, qapp)` already calls `apply(qapp)` BEFORE
     # notifying subscribers, so a re-subscribed apply() would run a

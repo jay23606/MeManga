@@ -104,10 +104,12 @@ venv\Scripts\python.exe -m memanga --help
 ### Where files are stored
 
 ```
-C:\Users\YourName\.config\memanga\config.yaml      # Configuration
-C:\Users\YourName\.config\memanga\state.json        # Download history
-C:\Users\YourName\.config\memanga\downloads\        # Downloaded chapters
+%APPDATA%\memanga\config.yaml      # Configuration
+%APPDATA%\memanga\state.json        # Download history
 ```
+
+`%APPDATA%` is usually `C:\Users\YourName\AppData\Roaming`. Chapters
+download to `Downloads\MeManga` in your user folder by default.
 
 ---
 
@@ -169,10 +171,11 @@ Or run directly through the virtual environment:
 ### Where files are stored
 
 ```
-/Users/YourName/.config/memanga/config.yaml      # Configuration
-/Users/YourName/.config/memanga/state.json        # Download history
-/Users/YourName/.config/memanga/downloads/        # Downloaded chapters
+~/Library/Application Support/memanga/config.yaml      # Configuration
+~/Library/Application Support/memanga/state.json        # Download history
 ```
+
+Chapters download to `~/Downloads/MeManga` by default.
 
 ---
 
@@ -250,10 +253,12 @@ Or run directly through the virtual environment:
 ### Where files are stored
 
 ```
-/home/YourName/.config/memanga/config.yaml      # Configuration
-/home/YourName/.config/memanga/state.json        # Download history
-/home/YourName/.config/memanga/downloads/        # Downloaded chapters
+~/.config/memanga/config.yaml      # Configuration
+~/.config/memanga/state.json        # Download history
 ```
+
+If `XDG_CONFIG_HOME` is set, the folder is `$XDG_CONFIG_HOME/memanga`
+instead. Chapters download to `~/Downloads/MeManga` by default.
 
 ---
 
@@ -909,7 +914,7 @@ When a new chapter is found and downloaded, MeManga sends it to your Kindle auto
 run config
 ```
 
-Set delivery mode to `local`. Downloaded chapters will be saved to `~/.config/memanga/downloads/`.
+Set delivery mode to `local`. Downloaded chapters will be saved to the download folder from Settings (`~/Downloads/MeManga` by default).
 
 ### Note on formats and email
 
@@ -1108,7 +1113,7 @@ Remove:
 ./scripts/run.sh cron remove
 ```
 
-Output is logged to `memanga.log` in the MeManga config directory (`~/.config/memanga/` by default, or the directory passed with `--config-dir`).
+Output is logged to `memanga.log` in the MeManga config directory (the platform folder listed in [Where your data lives](../README.md#where-your-data-lives) by default, or the directory passed with `--config-dir`).
 
 ### Linux — Cron
 
@@ -1460,7 +1465,7 @@ Open Task Scheduler (`taskschd.msc`) and find `MeManga_AutoCheck`. Check:
 ### Config file location
 
 ```
-C:\Users\YourName\.config\memanga\
+%APPDATA%\memanga\
 ```
 
 ---
@@ -1513,7 +1518,7 @@ Check if it's installed:
 Check the log file:
 
 ```bash
-cat ~/.config/memanga/memanga.log
+cat ~/Library/Application\ Support/memanga/memanga.log
 ```
 
 Verify the paths in the cron entry are correct:
@@ -1525,7 +1530,7 @@ crontab -l
 ### Config file location
 
 ```
-/Users/YourName/.config/memanga/
+~/Library/Application Support/memanga/
 ```
 
 ---

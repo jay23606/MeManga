@@ -2908,14 +2908,55 @@ class TestConfigDir:
         paths = self._status_paths(monkeypatch, capsys)
         assert paths["config_dir"] == str(isolated_home / ".config" / "memanga")
 
-    def test_rejected_with_gui(self, isolated_home, monkeypatch, tmp_path):
+    @staticmethod
+    def _launch_gui(monkeypatch, lock_holder, root, *argv):
+        """Run `memanga [argv] --gui` with a fake GUI; return what it got
+        and whether ``root`` was locked while it ran."""
         from memanga import cli
         monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
-        monkeypatch.setattr(sys, "argv", ["memanga", "--config-dir",
-                                          str(tmp_path / "x"), "--gui"])
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-        assert exc.value.code == 2
+        monkeypatch.setattr(sys, "argv", ["memanga", *argv, "--gui"])
+        seen = []
+        fake_gui = types.SimpleNamespace(launch_gui=lambda **kwargs: seen.append(
+            dict(kwargs, root_locked=not lock_holder.can_lock(root))))
+        monkeypatch.setitem(sys.modules, "memanga.gui", fake_gui)
+        cli.main()
+        return seen[0]
+
+    def test_gui_uses_flag_dir(self, isolated_home, monkeypatch, tmp_path,
+                               lock_holder):
+        """#249: `--config-dir DIR --gui` hands DIR to the GUI."""
+        root = tmp_path / "portable"
+        got = self._launch_gui(monkeypatch, lock_holder, root,
+                               "--config-dir", str(root))
+        assert got["config"].config_dir == got["state"].config_dir == root
+        assert got["explicit_config_dir"] == root
+        assert got["root_locked"]
+
+    def test_gui_uses_env_dir(self, isolated_home, monkeypatch, tmp_path,
+                              lock_holder):
+        root = tmp_path / "from-env"
+        monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(root))
+        got = self._launch_gui(monkeypatch, lock_holder, root)
+        assert got["config"].config_dir == got["state"].config_dir == root
+        assert got["explicit_config_dir"] == root
+        assert got["root_locked"]
+
+    def test_gui_flag_overrides_env(self, isolated_home, monkeypatch, tmp_path,
+                                    lock_holder):
+        monkeypatch.setenv("MEMANGA_CONFIG_DIR", str(tmp_path / "from-env"))
+        root = tmp_path / "from-flag"
+        got = self._launch_gui(monkeypatch, lock_holder, root,
+                               "--config-dir", str(root))
+        assert got["config"].config_dir == root
+        assert got["explicit_config_dir"] == root
+        assert not (tmp_path / "from-env").exists()
+
+    def test_gui_default_has_no_explicit_dir(self, isolated_home, monkeypatch,
+                                             lock_holder):
+        root = isolated_home / ".config" / "memanga"
+        got = self._launch_gui(monkeypatch, lock_holder, root)
+        assert got["config"].config_dir == root
+        assert got["explicit_config_dir"] is None
 
     def test_cron_install_keeps_config_dir(self, isolated_home, monkeypatch,
                                            tmp_path):
