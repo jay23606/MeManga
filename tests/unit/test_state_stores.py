@@ -353,8 +353,8 @@ def legacy_state(isolated_home):
 class TestSchemaCompatibility:
     def test_default_top_level_keys_unchanged(self, state):
         assert set(state._data) == {
-            "manga", "last_check", "check_history", "notifications",
-            "download_history", "source_health",
+            "schema_version", "manga", "last_check", "check_history",
+            "notifications", "download_history", "source_health",
         }
 
     def test_new_manga_entry_keys_unchanged(self, state):
@@ -366,8 +366,10 @@ class TestSchemaCompatibility:
         }
 
     def test_existing_file_round_trips_unchanged(self, legacy_state):
+        # Only the schema version (issue #409) is added on save.
         legacy_state.save()
-        assert json.loads(legacy_state.state_path.read_text()) == LEGACY_STATE
+        assert json.loads(legacy_state.state_path.read_text()) == {
+            **LEGACY_STATE, "schema_version": 1}
 
     def test_stores_read_existing_file(self, legacy_state):
         s, title = legacy_state, "Legacy Title"

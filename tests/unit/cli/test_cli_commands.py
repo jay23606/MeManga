@@ -3588,6 +3588,45 @@ class TestInvalidConfigFile:
         assert path.read_text(encoding="utf-8") == self.BROKEN
 
 
+class TestNewerSchemaFiles:
+    """Config or state from a newer MeManga is refused and left as it
+    is; files from before schema versions keep working (issue #409)."""
+
+    def _root(self, home):
+        return home / ".config" / "memanga"
+
+    def test_newer_config_refuses_commands(self, run_cli, isolated_home, capsys):
+        path = self._root(isolated_home) / "config.yaml"
+        path.write_text("schema_version: 99\nmanga: []\n", encoding="utf-8")
+        assert run_cli("list") == 1
+        err = capsys.readouterr().err
+        assert "cannot load config file" in err
+        assert "update MeManga" in err
+        assert path.read_text(encoding="utf-8") == "schema_version: 99\nmanga: []\n"
+
+    def test_newer_state_refuses_commands(self, run_cli, isolated_home, capsys):
+        path = self._root(isolated_home) / "state.json"
+        newer = json.dumps({"schema_version": 99, "manga": {}})
+        path.write_text(newer, encoding="utf-8")
+        assert run_cli("list") == 1
+        err = capsys.readouterr().err
+        assert "cannot load state file" in err
+        assert "update MeManga" in err
+        assert path.read_text(encoding="utf-8") == newer
+
+    def test_unversioned_config_upgraded_on_save(self, run_cli, isolated_home):
+        import yaml
+        root = self._root(isolated_home)
+        (root / "config.yaml").write_text(
+            "manga:\n- title: Berserk\n  url: https://example.com/berserk\n",
+            encoding="utf-8")
+        assert run_cli("config", "set", "delivery.output_format", "cbz") == 0
+        config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        assert config["schema_version"] == 1
+        assert config["manga"][0]["title"] == "Berserk"
+        assert config["delivery"]["output_format"] == "cbz"
+
+
 class TestDamagedStateFile:
     """A damaged state.json is copied aside with a warning; one that cannot
     be loaded, copied or restored makes commands refuse (issue #243)."""
