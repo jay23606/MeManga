@@ -78,6 +78,14 @@ class GuiChapterReporter(ChapterReporter):
 
     def email_skipped_folder(self, path: Path):
         self._log(f"Kindle skipped (image folders cannot be emailed): {path}")
+        # Issue #340: tell the user, as the CLI does, rather than only
+        # logging it.
+        self._events.publish("kindle_skipped", {
+            "task_id": self._task_id,
+            "title": self._title,
+            "chapter": self._chapter.number,
+            "path": str(path),
+        })
 
     def email_sent(self, path: Path):
         self._events.publish("kindle_sent", {
