@@ -78,11 +78,16 @@ def main():
         run(f'"{python_exe}" -m playwright install-deps')
         print()
 
-    # Create config directory
-    config_dir = Path.home() / ".config" / "memanga" / "downloads"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    print(f"✓ Config directory: {config_dir.parent}")
-    print()
+    # Create config directory: the platform folder the app itself uses
+    result = subprocess.run(
+        [str(python_exe), "-c",
+         "from memanga.config import default_config_dir; "
+         "d = default_config_dir(); d.mkdir(parents=True, exist_ok=True); print(d)"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print(f"✓ Config directory: {result.stdout.strip()}")
+        print()
 
     print("=" * 50)
     print("✅ Setup complete!")

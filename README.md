@@ -84,7 +84,7 @@ When you open MeManga for the first time:
 1. The Library page is empty — click **+ Add manga** in the header.
 2. Paste a manga URL from any [supported source](docs/SUPPORTED_SOURCES.md), or click **Search** in the sidebar and type the title.
 3. The app remembers what you added, what you've downloaded, and what you've read across restarts and across machines
-   (config lives in `~/.config/memanga/`, you can import/export it).
+   (config lives in your [MeManga config folder](#where-your-data-lives), you can import/export it).
 
 <p align="center">
   <img src="docs/screenshots/add-manga-modal.png" alt="Add Manga dialog" width="700">
@@ -494,21 +494,53 @@ commands, scraper-add walkthroughs, and the lock-refresh flow.
 
 ## Where your data lives
 
+MeManga keeps its files in the config folder of your platform:
+
+| Platform | Config folder |
+|---|---|
+| Windows | `%APPDATA%\memanga\` (usually `C:\Users\<you>\AppData\Roaming\memanga\`) |
+| macOS | `~/Library/Application Support/memanga/` |
+| Linux and others | `$XDG_CONFIG_HOME/memanga/`, or `~/.config/memanga/` when `XDG_CONFIG_HOME` is not set |
+
 | Path | What |
 |---|---|
-| `~/.config/memanga/config.yaml` | Library, settings, source toggles, theme |
-| `~/.config/memanga/state.json` | Read/unread state, download history, source health |
-| `~/.config/memanga/*.bak` | Previous copy of `config.yaml` / `state.json`, kept on every save |
-| `~/.config/memanga/state.json.corrupt-*` | A damaged state file, kept for recovery instead of being overwritten |
-| `~/.config/memanga/covers/` | Cover image cache |
-| `~/.config/memanga/crash.log` | Uncaught exceptions from the windowed release exe |
+| `<config folder>/config.yaml` | Library, settings, source toggles, theme |
+| `<config folder>/state.json` | Read/unread state, download history, source health |
+| `<config folder>/*.bak` | Previous copy of `config.yaml` / `state.json`, kept on every save |
+| `<config folder>/state.json.corrupt-*` | A damaged state file, kept for recovery instead of being overwritten |
+| `<config folder>/covers/` | Cover image cache |
+| `<config folder>/crash.log` | Uncaught exceptions from the windowed release exe |
 | `~/Downloads/MeManga/<title>/` | Default download folder (changeable in Settings) |
 
-The CLI can use another directory for `config.yaml` and `state.json`:
+`memanga config path` prints the config file in use.
+
+Earlier versions used `~/.config/memanga/` on every platform. When that
+folder holds a library and the platform folder does not, the first start
+of the app or any command moves it there (a single rename, nothing is
+copied or deleted) and leaves a `MOVED.txt` note in the old folder, so
+scheduled checks installed earlier keep running. If the platform folder
+already holds a library, it is used and the old folder is left alone.
+MeManga keeps using the old folder, unchanged, when another MeManga is
+running, when the platform folder exists and is not empty, when your
+settings point to a path inside the old folder (for example a download
+folder), or when the move fails, for example because the folders are on
+different drives.
+
+MeManga can use another directory for `config.yaml` and `state.json`:
 `memanga --config-dir DIR <command>` (the option goes before the
-command), or set `MEMANGA_CONFIG_DIR=DIR`. The flag wins over the
-variable. `cron install` keeps the selected directory in the scheduled
-check. The GUI always uses `~/.config/memanga/`.
+command, also `memanga --config-dir DIR --gui`), or set
+`MEMANGA_CONFIG_DIR=DIR`. The CLI and the desktop app choose the same
+way:
+
+1. `--config-dir DIR` (CLI and `memanga --gui`)
+2. `MEMANGA_CONFIG_DIR` (CLI, `memanga --gui` and the desktop app
+   started on its own)
+3. the platform folder above
+
+A chosen directory is used as is and never moves the old folder. The
+app's settings, library, lock, logs (`runtime.log`, `crash.log`) and
+cover cache all live in it. `cron install` and the daily check set up in
+the app's Settings keep a chosen directory in the scheduled check.
 
 Sensitive credentials (SMTP App Password) are stored in the OS keyring
 (Keychain on macOS, Credential Manager on Windows, Secret Service on

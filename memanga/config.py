@@ -2,17 +2,199 @@
 Configuration management for MeManga
 """
 
+import os
+import sys
 import threading
 import yaml
 from pathlib import Path
+from typing import Optional
 
 from .perf import timed
 from .persist import atomic_write_text
+from .process_lock import ConfigDirBusy, ConfigDirLock, ConfigDirLockError
+
+APP_DIR_NAME = "memanga"
+
+# Issue #221: `--config-dir DIR` wins over $MEMANGA_CONFIG_DIR, which
+# wins over the platform default (issue #249). The CLI and the desktop
+# app select the directory the same way.
+CONFIG_DIR_ENV = "MEMANGA_CONFIG_DIR"
+
+# Files that mark a directory as holding a user's MeManga data. Logs,
+# the lock file and the cover cache alone do not count.
+DATA_FILES = ("config.yaml", "state.json", "config.yaml.bak", "state.json.bak")
+
+# Left in the old directory after it was moved (issue #249).
+MOVED_NOTE = "MOVED.txt"
+
+
+def platform_config_dir(platform=None, environ=None, home=None) -> Path:
+    """The platform's per-user config root for MeManga (issue #249).
+
+    - Windows: ``%APPDATA%\\memanga`` (the roaming application data
+      folder; ``~\\AppData\\Roaming`` when APPDATA is unset).
+    - macOS: ``~/Library/Application Support/memanga``.
+    - Linux and other systems: ``$XDG_CONFIG_HOME/memanga``, or
+      ``~/.config/memanga`` when the variable is unset, empty or not an
+      absolute path (XDG Base Directory Specification).
+
+    The arguments exist for tests; by default the running system is used.
+    """
+    platform = sys.platform if platform is None else platform
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else Path(home)
+    if platform == "win32":
+        base = environ.get("APPDATA")
+        root = Path(base) if base and os.path.isabs(base) else home / "AppData" / "Roaming"
+    elif platform == "darwin":
+        root = home / "Library" / "Application Support"
+    else:
+        base = environ.get("XDG_CONFIG_HOME")
+        root = Path(base) if base and os.path.isabs(base) else home / ".config"
+    return root / APP_DIR_NAME
+
+
+def legacy_config_dir(home=None) -> Path:
+    """Where every platform kept config and state before issue #249."""
+    home = Path.home() if home is None else Path(home)
+    return home / ".config" / APP_DIR_NAME
+
+
+def explicit_config_dir(cli_value=None) -> Optional[Path]:
+    """The directory chosen with ``--config-dir`` (``cli_value``) or
+    ``$MEMANGA_CONFIG_DIR``, or None when neither is set."""
+    value = cli_value or os.environ.get(CONFIG_DIR_ENV)
+    if not value:
+        return None
+    return Path(value).expanduser().absolute()
+
+
+def selected_config_dir(cli_value=None) -> Path:
+    """The config root for this run: an explicit directory as is, else
+    :func:`default_config_dir`. An explicit directory never moves the
+    legacy folder."""
+    return explicit_config_dir(cli_value) or default_config_dir()
 
 
 def default_config_dir() -> Path:
-    """Config root used when none is selected: ~/.config/memanga."""
-    return Path.home() / ".config" / "memanga"
+    """Config root used when none is selected (issue #249).
+
+    The platform directory (see :func:`platform_config_dir`) is used,
+    unless only the legacy ``~/.config/memanga`` holds data: that
+    directory is then moved there once by
+    :func:`migrate_legacy_config_dir`, or kept in use if it cannot be
+    moved safely. ``--config-dir`` and ``$MEMANGA_CONFIG_DIR`` bypass this.
+    """
+    native = platform_config_dir()
+    legacy = legacy_config_dir()
+    if _same_dir(native, legacy) or has_config_data(native) or not has_config_data(legacy):
+        return native
+    return migrate_legacy_config_dir(legacy, native)
+
+
+def default_root_moved(root) -> bool:
+    """True when ``root`` is the legacy folder that default_config_dir()
+    returned, but another process has since moved it to the platform
+    folder: it holds no data any more and the platform folder does. A
+    root selected this way must not be loaded or saved (issue #249)."""
+    native = platform_config_dir()
+    legacy = legacy_config_dir()
+    return (_same_dir(root, legacy) and not _same_dir(native, legacy)
+            and not has_config_data(legacy) and has_config_data(native))
+
+
+def has_config_data(directory) -> bool:
+    """True when ``directory`` holds MeManga config or state files."""
+    directory = Path(directory)
+    return any((directory / name).is_file() for name in DATA_FILES)
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _refers_to_itself(directory: Path) -> bool:
+    """True when config.yaml or state.json names a path inside the legacy
+    directory (for example a download folder there), which a move would
+    break. Errs on the side of True."""
+    for name in ("config.yaml", "state.json"):
+        try:
+            text = (directory / name).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        # Fold YAML/JSON backslash escapes and Windows separators.
+        text = text.lower().replace("\\\\", "/").replace("\\", "/")
+        if f".config/{APP_DIR_NAME}" in text:
+            return True
+    return False
+
+
+def migrate_legacy_config_dir(legacy, native) -> Path:
+    """Move ``legacy`` to ``native`` once; return the directory to use.
+
+    The move is a single directory rename taken under the legacy
+    directory's process lock (issue #244), so nothing is copied, merged
+    or deleted and no other MeManga process can write during it. The
+    legacy directory is kept in use, unchanged, when:
+
+    - another process holds its lock (an older MeManga may be running);
+    - ``native`` already exists and is not an empty directory;
+    - its config or state names a path inside it;
+    - the rename fails (another drive, permissions, open files).
+
+    After a move, ``legacy`` is recreated with only a short note, so
+    scheduled checks installed before the move still find their working
+    and log directory.
+    """
+    legacy, native = Path(legacy), Path(native)
+    lock = ConfigDirLock(legacy)
+    try:
+        lock.acquire()
+    except (ConfigDirBusy, ConfigDirLockError):
+        # Another process may be moving it right now.
+        return native if has_config_data(native) else legacy
+    try:
+        # Re-check under the lock: another process may have moved it.
+        if has_config_data(native) or not has_config_data(legacy):
+            return native
+        # This process already uses the legacy directory.
+        if lock.joined:
+            return legacy
+        if _refers_to_itself(legacy):
+            return legacy
+        if native.exists():
+            if not native.is_dir() or any(native.iterdir()):
+                return legacy
+            native.rmdir()
+        native.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            # Windows cannot rename a folder with an open file in it; a
+            # process that opens the lock now makes the rename fail.
+            lock.release()
+        os.rename(legacy, native)
+    except OSError:
+        return legacy
+    finally:
+        lock.release()
+    _leave_moved_note(legacy, native)
+    return native
+
+
+def _leave_moved_note(legacy: Path, native: Path):
+    try:
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / MOVED_NOTE).write_text(
+            "MeManga now keeps its settings and library in:\n"
+            f"{native}\n\n"
+            "This folder is kept so scheduled checks installed earlier keep "
+            "working. After reinstalling the daily check (Settings in the "
+            "app, or `memanga cron install`), it can be deleted.\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 class ConfigError(Exception):

@@ -56,6 +56,12 @@ def isolated_home(monkeypatch, tmp_path) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     # A developer's MEMANGA_CONFIG_DIR would point the CLI elsewhere.
     monkeypatch.delenv("MEMANGA_CONFIG_DIR", raising=False)
+    # Issue #249: the default root is the platform config folder. Pin it
+    # to the isolated ~/.config/memanga on every OS so the suite behaves
+    # the same on Windows and macOS as on Linux.
+    from memanga import config as config_mod
+    monkeypatch.setattr(config_mod, "platform_config_dir",
+                        lambda *args, **kwargs: tmp_path / ".config" / "memanga")
     (tmp_path / ".config" / "memanga").mkdir(parents=True, exist_ok=True)
     return tmp_path
 

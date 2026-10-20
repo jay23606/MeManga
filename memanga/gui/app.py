@@ -24,13 +24,19 @@ from .pages.base import BasePage
 class MeMangaApp(QMainWindow):
     """Main application window."""
 
-    def __init__(self, config=None, app_state=None):
+    def __init__(self, config=None, app_state=None, explicit_config_dir=None):
         super().__init__()
+
+        # Directory chosen with --config-dir or $MEMANGA_CONFIG_DIR, or
+        # None for the default; the daily check set up in Settings keeps
+        # it (issues #221, #249).
+        self.explicit_config_dir = explicit_config_dir
 
         # Shared state. launch_gui() passes the objects it already loaded
         # and checked (issue #243).
-        self.config = config if config is not None else Config()
-        self.app_state = app_state if app_state is not None else State()
+        self.config = config if config is not None else Config(explicit_config_dir)
+        self.app_state = (app_state if app_state is not None
+                          else State(self.config.config_dir))
         # Order matters: the repair only applies to configs that were
         # already seeded on an earlier launch, so it has to read the
         # flag before seeding sets it.
@@ -213,8 +219,10 @@ class MeMangaApp(QMainWindow):
             self._sidebar.set_active(name)
 
     def reload_data(self):
-        self.config = Config()
-        self.app_state = State()
+        # Same directory, never the default again (issue #249).
+        root = self.config.config_dir
+        self.config = Config(root)
+        self.app_state = State(root)
 
     # ---- Event Handlers ----
 

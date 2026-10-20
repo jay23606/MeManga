@@ -104,10 +104,16 @@ class ConfigDirLock:
         self.path = self.config_dir / LOCK_FILENAME
         self._key = _key(self.config_dir)
         self._acquired = False
+        self._joined = False
 
     @property
     def acquired(self) -> bool:
         return self._acquired
+
+    @property
+    def joined(self) -> bool:
+        """True when acquire() joined a lock this process already held."""
+        return self._acquired and self._joined
 
     def acquire(self) -> "ConfigDirLock":
         if self._acquired:
@@ -117,6 +123,7 @@ class ConfigDirLock:
             if entry is not None:
                 entry[1] += 1
                 self._acquired = True
+                self._joined = True
                 return self
             try:
                 self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +142,7 @@ class ConfigDirLock:
                 raise
             _held[self._key] = [fd, 1]
             self._acquired = True
+            self._joined = False
             return self
 
     def release(self):

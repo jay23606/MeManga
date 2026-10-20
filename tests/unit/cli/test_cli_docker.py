@@ -40,6 +40,19 @@ class TestCliOnlyEnvVar:
         assert "--gui" not in out
         assert "graphical" not in out.lower()
 
+    def test_help_mentions_config_dir_with_gui_outside_cli_only(
+            self, monkeypatch, isolated_home, capsys):
+        """#249: with the GUI installed, --config-dir help says it also
+        applies to --gui; the CLI-only help above must not."""
+        monkeypatch.delenv("MEMANGA_CLI_ONLY", raising=False)
+        monkeypatch.setattr(sys, "argv", ["memanga", "--help"])
+        import memanga.cli as cli
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 0
+        out = " ".join(capsys.readouterr().out.split())
+        assert "also with --gui" in out
+
     def test_help_hides_epilog_gui_line(self, monkeypatch, isolated_home, capsys):
         monkeypatch.setenv("MEMANGA_CLI_ONLY", "1")
         monkeypatch.setattr(sys, "argv", ["memanga", "--help"])

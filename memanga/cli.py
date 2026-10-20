@@ -34,9 +34,11 @@ from .backup import (
     validate_backup,
     validate_backup_contents,
 )
-from .config import (CONFIG_KEYS, Config, ConfigError, UnknownConfigKey,
+from .config import (CONFIG_DIR_ENV, CONFIG_KEYS, Config, ConfigError,
+                     UnknownConfigKey,
                      config_key_spec, config_section_problems,
                      config_value_problem, default_config_dir,
+                     default_root_moved, explicit_config_dir,
                      get_app_password, parse_config_value, set_app_password)
 from .cron import (build_cron_line, build_task_command, managed_lines,
                    read_crontab,
@@ -97,10 +99,6 @@ def _error(message: str) -> int:
     err_console.print(message)
     return EXIT_ERROR
 
-# Issue #221: `--config-dir DIR` wins over $MEMANGA_CONFIG_DIR, which
-# wins over the default ~/.config/memanga.
-CONFIG_DIR_ENV = "MEMANGA_CONFIG_DIR"
-
 
 @dataclass
 class CliContext:
@@ -119,25 +117,28 @@ config: Optional[Config] = None
 state: Optional[State] = None
 
 
+# Issue #221: `--config-dir DIR` wins over $MEMANGA_CONFIG_DIR, which
+# wins over the platform default (issue #249). The selection lives in
+# memanga.config so the GUI shares it.
 def resolve_config_dir(cli_value=None) -> Optional[Path]:
     """Return the selected config root, or None for the default."""
-    value = cli_value or os.environ.get(CONFIG_DIR_ENV)
-    if not value:
-        return None
-    return Path(value).expanduser().absolute()
+    return explicit_config_dir(cli_value)
 
 
-def build_context(config_dir=None, recover_state=True) -> CliContext:
+def build_context(config_dir=None, recover_state=True, root=None) -> CliContext:
     """Build Config and State under ``config_dir`` (None = default).
 
+    ``root`` is the directory main() already resolved and locked for the
+    default case, so Config and State never pick the default twice.
     Config is tolerant so a broken config.yaml still reaches `doctor`;
     main() refuses every other command (issue #250). ``recover_state``
     is False when the config directory is not locked (issue #244): a
     damaged state.json is then left as it is.
     """
+    root = config_dir or root or default_config_dir()
     return CliContext(
-        config=Config(config_dir, tolerate_errors=True),
-        state=State(config_dir, recover=recover_state),
+        config=Config(root, tolerate_errors=True),
+        state=State(root, recover=recover_state),
         config_dir=config_dir,
     )
 
@@ -206,6 +207,32 @@ def _acquire_config_lock(config_dir: Path, required: bool = True) -> bool:
         sys.exit(EXIT_ERROR)
     _config_lock = lock
     return True
+
+
+def _revalidate_default_root(root: Path, locked: bool) -> Path:
+    """Return the default root to load, after the lock (issue #249).
+
+    Another process may move the legacy ~/.config/memanga to the
+    platform folder between default_config_dir() and taking the lock;
+    this process would then lock a recreated, empty legacy folder and
+    save where no normal start looks. Switch to the platform folder
+    (locked when ``locked``) instead, or exit 1 if that is not possible.
+    Nothing has been loaded yet.
+    """
+    if not default_root_moved(root):
+        return root
+    if locked:
+        _release_config_lock()
+    new_root = default_config_dir()
+    if default_root_moved(new_root):
+        sys.stderr.write(
+            f"error: MeManga's config folder was just moved from {root}; "
+            "nothing was changed. Retry the command.\n"
+        )
+        sys.exit(EXIT_ERROR)
+    if locked:
+        _acquire_config_lock(new_root)
+    return new_root
 
 
 def _release_config_lock():
@@ -3383,8 +3410,10 @@ Examples:
     )
     parser.add_argument(
         "--config-dir", metavar="DIR",
-        help=f"Use DIR for config.yaml and state.json (default: ${CONFIG_DIR_ENV} "
-             "or ~/.config/memanga). Goes before the command.",
+        help=f"Use DIR for config.yaml and state.json"
+             f"{'' if _cli_only else ', also with --gui'} "
+             f"(default: ${CONFIG_DIR_ENV} or the platform config folder). "
+             "Goes before the command.",
     )
     # In CLI-only Docker images (MEMANGA_CLI_ONLY=1) the GUI is not installed;
     # suppress the flag from help and reject it at runtime with a clear message.
@@ -3813,28 +3842,28 @@ def _main():
             p_config.error(f"{legacy[0]} cannot be combined with the "
                            f"'{args.config_action}' action")
 
-    # The GUI always uses the default root; main() loads Config/State
-    # there and hands them to launch_gui().
-    if args.gui and args.config_dir:
-        parser.error("--config-dir is not supported with --gui")
-
     # Needs no config or state, so it works before setup and never
     # writes to the config directory.
     if args.command == "completion" and not args.gui:
         sys.exit(args.func(args))
-    config_dir = None if args.gui else resolve_config_dir(args.config_dir)
+    # The GUI selects the same way (issue #249): main() loads Config/State
+    # in the selected root and hands them, and an explicit choice, to
+    # launch_gui().
+    config_dir = resolve_config_dir(args.config_dir)
     # Issue #244: lock before loading, so no other process can write
     # between this load and our last save.
     lock_dir = config_dir or default_config_dir()
     locked = _needs_config_lock(args)
     if locked:
         _acquire_config_lock(lock_dir)
-    ctx = build_context(config_dir, recover_state=locked)
+    if config_dir is None:
+        lock_dir = _revalidate_default_root(lock_dir, locked)
+    ctx = build_context(config_dir, recover_state=locked, root=lock_dir)
     # A read-only command found a damaged state.json: repair it only
     # while holding the lock (kept until main() ends), else leave it
     # untouched and report it through state.load_error.
     if ctx.state.needs_recovery and _acquire_config_lock(lock_dir, required=False):
-        ctx = build_context(config_dir)
+        ctx = build_context(config_dir, root=lock_dir)
     use_context(ctx)
 
     # Only doctor and `config path/edit` may run on fallback defaults;
@@ -3871,7 +3900,7 @@ def _main():
         from .gui import launch_gui
         # Hand over the loaded state so the GUI can show its recovery
         # notice; a second State() would find the repaired file.
-        launch_gui(config=config, state=state)
+        launch_gui(config=config, state=state, explicit_config_dir=config_dir)
         return
 
     with _sigterm_as_shutdown():

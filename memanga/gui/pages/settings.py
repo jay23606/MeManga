@@ -1087,11 +1087,18 @@ class SettingsPage(BasePage):
         else:
             self._install_cron_unix(hour, minute)
 
+    def _explicit_config_dir(self):
+        """The --config-dir / $MEMANGA_CONFIG_DIR choice the window runs
+        on, pinned into the scheduled check like `memanga cron install`
+        does (issue #221); None keeps the default location."""
+        return getattr(self.app, "explicit_config_dir", None)
+
     def _install_cron_unix(self, hour, minute):
         # Issue #232: run the current interpreter and log to the config
         # root, never into the package install directory.
         cron_cmd = build_cron_line(minute, hour, self.app.config.config_dir,
                                    sys.executable,
+                                   config_dir=self._explicit_config_dir(),
                                    source_root=source_checkout_root())
         try:
             result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
@@ -1125,6 +1132,7 @@ class SettingsPage(BasePage):
         task_name = "MeManga_AutoCheck"
         # Issue #232: the running interpreter, not a checkout-local venv.
         cmd = build_task_command(sys.executable,
+                                 config_dir=self._explicit_config_dir(),
                                  source_root=source_checkout_root())
         try:
             # no_window_kwargs(): release exe is console=False, so any

@@ -74,6 +74,20 @@ All notable changes are recorded here. Format loosely follows
   as aliases of `retry`/`clear`.
 
 ### Changed
+- #249 Config and state live in the platform config folder:
+  `%APPDATA%\memanga` on Windows, `~/Library/Application Support/memanga`
+  on macOS and `$XDG_CONFIG_HOME/memanga` (default `~/.config/memanga`) on
+  Linux. The CLI and the desktop app pick the same folder. An existing
+  `~/.config/memanga` is moved there once, as a single rename under the
+  config lock, and a `MOVED.txt` note stays behind so scheduled checks
+  installed earlier keep running. When the move is not safe (another
+  MeManga is running, the new folder is not empty, settings point inside
+  the old folder, or the rename fails) the old folder stays in use
+  unchanged. `--config-dir` and `MEMANGA_CONFIG_DIR` still win and never
+  move anything, and now apply to the desktop app too:
+  `memanga --config-dir DIR --gui` opens the app on DIR (it was refused
+  before), the app started on its own honours `MEMANGA_CONFIG_DIR`, and
+  the daily check set up in its Settings keeps the chosen directory.
 - #348 `edit` is the command for changing a tracked manga, including its
   status (`memanga edit "One Piece" --status on-hold`); `update` stays an
   alias. Help and the bash completion list `edit (update)`.
