@@ -1161,6 +1161,17 @@ or a kill, so `memanga.lock` never needs to be deleted. A config
 directory on a file system without file-lock support is refused with
 `cannot lock`; use a directory on a local disk.
 
+### File versions
+
+`config.yaml` and `state.json` record their layout in a `schema_version`
+field. Files from an older MeManga, including ones without the field,
+load as before and are upgraded the next time MeManga saves them; the
+file as it was before is kept as `config.yaml.bak` or `state.json.bak`.
+A file written by a newer MeManga is never loaded or overwritten:
+commands exit `1`, the desktop app shows an error and `memanga doctor`
+reports a failure until MeManga is updated (or the file is moved).
+Leave `schema_version` as it is when editing `config.yaml` by hand.
+
 ---
 
 ## Export and Import

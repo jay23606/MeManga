@@ -12,6 +12,8 @@ from typing import Optional
 from .perf import timed
 from .persist import atomic_write_text
 from .process_lock import ConfigDirBusy, ConfigDirLock, ConfigDirLockError
+from .schema import (SCHEMA_VERSION_KEY, SchemaVersionError, add_schema_version,
+                     migrate as migrate_schema)
 
 APP_DIR_NAME = "memanga"
 
@@ -26,6 +28,13 @@ DATA_FILES = ("config.yaml", "state.json", "config.yaml.bak", "state.json.bak")
 
 # Left in the old directory after it was moved (issue #249).
 MOVED_NOTE = "MOVED.txt"
+
+# Issue #409: layout version of config.yaml (see memanga.schema). When
+# it is bumped, register ``old_version: migrate_fn`` below.
+CONFIG_SCHEMA_VERSION = 1
+_CONFIG_MIGRATIONS = {
+    0: add_schema_version,
+}
 
 
 def platform_config_dir(platform=None, environ=None, home=None) -> Path:
@@ -240,6 +249,13 @@ class Config:
                     data = yaml.safe_load(f) or {}
                 if not isinstance(data, dict):
                     raise ConfigError("config file does not contain a YAML mapping")
+                # Issue #409: upgrade an older layout before the defaults
+                # are merged in; refuse a config from a newer MeManga.
+                try:
+                    data = migrate_schema(data, CONFIG_SCHEMA_VERSION,
+                                          _CONFIG_MIGRATIONS, "config")
+                except SchemaVersionError as e:
+                    raise ConfigError(str(e)) from None
             except (OSError, UnicodeDecodeError, yaml.YAMLError, ConfigError) as e:
                 if not self._tolerate_errors:
                     raise
@@ -263,6 +279,7 @@ class Config:
     def _default_config(self):
         """Return default configuration."""
         return {
+            SCHEMA_VERSION_KEY: CONFIG_SCHEMA_VERSION,
             "manga": [],
             "delivery": {
                 "mode": "local",  # "local" or "email"

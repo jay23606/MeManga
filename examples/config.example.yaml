@@ -1,6 +1,10 @@
 # MeManga Configuration Example
 # Copy to ~/.config/memanga/config.yaml
 
+# Layout version of this file, managed by MeManga. Older files are
+# upgraded on the next save; leave it as it is.
+schema_version: 1
+
 # Tracked manga list
 manga:
   # Simple format (single source)

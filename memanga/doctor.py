@@ -256,6 +256,12 @@ def check_config(config, state=None) -> CheckResult:
             return CheckResult("config", FAIL, f"Config file is not valid YAML: {e}", details)
         if data is not None and not isinstance(data, dict):
             return CheckResult("config", FAIL, "Config file does not contain a YAML mapping", details)
+        # Issue #409: e.g. a config from a newer MeManga, which Config
+        # refuses to load and to overwrite.
+        load_error = getattr(config, "load_error", None)
+        if load_error:
+            return CheckResult("config", FAIL,
+                               f"Config file could not be loaded: {load_error}", details)
 
     error = _probe_writable(config_dir) if config_dir.is_dir() else "directory is missing"
     if error:

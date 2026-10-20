@@ -7,6 +7,13 @@ All notable changes are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- #409 `config.yaml` and `state.json` carry a `schema_version`. Files
+  from older releases load as before and are upgraded on their next
+  save, with the previous file kept as the `.bak` copy; future layout
+  changes run as step-by-step migrations. A file from a newer MeManga
+  is refused and left as it is instead of being overwritten: commands
+  exit 1 with an update hint, the desktop app shows an error and
+  `memanga doctor` reports it.
 - #357 `memanga path TARGET` prints the download folder of a tracked manga
   (only the absolute path, so `cd "$(memanga path TARGET)"` works) and
   `memanga open TARGET` opens it in the system file manager. A manga with

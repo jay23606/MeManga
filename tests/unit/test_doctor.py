@@ -177,6 +177,24 @@ class TestLocalPathChecks:
         config.config_path.write_text("- just\n- a list\n", encoding="utf-8")
         assert doctor.check_config(config).status == doctor.FAIL
 
+    def test_newer_config_schema_fails(self, config):
+        """Issue #409: valid YAML that Config refuses to load is not OK."""
+        from memanga.config import Config
+        config.config_path.write_text("schema_version: 99\n", encoding="utf-8")
+        loaded = Config(config.config_dir, tolerate_errors=True)
+        result = doctor.check_config(loaded)
+        assert result.status == doctor.FAIL
+        assert "newer" in result.message
+        assert "update MeManga" in result.message
+
+    def test_newer_state_schema_fails(self, config, isolated_home):
+        from memanga.state import State
+        cfg_dir = isolated_home / ".config" / "memanga"
+        (cfg_dir / "state.json").write_text('{"schema_version": 99}', encoding="utf-8")
+        result = doctor.check_state(config, State(config_dir=cfg_dir))
+        assert result.status == doctor.FAIL
+        assert "newer" in result.message
+
     def test_corrupt_state_fails(self, config, state):
         state.state_path.write_text("{not json", encoding="utf-8")
         result = doctor.check_state(config, state)

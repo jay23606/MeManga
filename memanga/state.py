@@ -18,6 +18,8 @@ from typing import List, Optional, Dict, Any, Mapping
 from .config import default_config_dir
 from .perf import timed
 from .persist import atomic_write_text, preserve_corrupt
+from .schema import (SCHEMA_VERSION_KEY, SchemaVersionError, add_schema_version,
+                     migrate as migrate_schema)
 from .state_stores import (ActivityStore, BackupStore, CatalogueStore,
                            FailureStore, LibraryStore, NotificationStore,
                            ReadingStore, SearchHistoryStore,
@@ -29,6 +31,14 @@ from .state_stores._base import (  # noqa: F401
     chapter_number as _chapter_number,
     chapter_sort_key as _chapter_sort_key,
 )
+
+
+# Issue #409: layout version of state.json (see memanga.schema). When
+# it is bumped, register ``old_version: migrate_fn`` below.
+STATE_SCHEMA_VERSION = 1
+_STATE_MIGRATIONS = {
+    0: add_schema_version,
+}
 
 
 class StateError(Exception):
@@ -99,6 +109,25 @@ class State:
         self._data, restored = self._load()
         if restored:
             self._write_back_restored()
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        """Bring the loaded state up to STATE_SCHEMA_VERSION (issue #409).
+
+        Only ``_data`` changes: the next save writes the upgraded layout
+        and keeps the file it replaces as state.json.bak, and a read-only
+        command never writes it. Runs after _write_back_restored so a
+        restored backup is written back as it was. A state file from a
+        newer MeManga (or with an invalid version) sets ``load_error`` so
+        it is never overwritten.
+        """
+        try:
+            self._data = migrate_schema(self._data, STATE_SCHEMA_VERSION,
+                                        _STATE_MIGRATIONS, "state")
+        except SchemaVersionError as e:
+            self.recovery_notice = None
+            self.load_error = f"{self.state_path}: {e}"
+            self._data = self._default_state()
 
     def _write_back_restored(self):
         """Replace the damaged state.json with the copy restored from
@@ -203,6 +232,7 @@ class State:
     def _default_state(self) -> Dict[str, Any]:
         """Return default state structure."""
         return {
+            SCHEMA_VERSION_KEY: STATE_SCHEMA_VERSION,
             "manga": {},
             "last_check": None,
             "check_history": [],
