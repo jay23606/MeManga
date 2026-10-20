@@ -1,7 +1,7 @@
 @echo off
 REM MeManga setup for Windows
 REM Wrapper that calls the cross-platform Python setup
-REM setup.py switches to the project root itself; the caller's
+REM bootstrap.py switches to the project root itself; the caller's
 REM working directory is left unchanged.
 
 setlocal
@@ -12,4 +12,4 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-python "%~dp0..\..\setup.py"
+python "%~dp0..\bootstrap.py"

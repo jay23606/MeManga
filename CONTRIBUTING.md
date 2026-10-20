@@ -20,6 +20,10 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 pip install -e ".[dev]"           # also pulls pytest, pyinstaller, etc.
+python -m playwright install chromium firefox   # browsers for the scrapers
+
+# Or run the one-step setup instead (venv, deps, browsers, config folder):
+# python scripts/bootstrap.py
 
 # Run the GUI
 python -m memanga.gui
@@ -56,7 +60,7 @@ tests/                  # Unit + integration tests
 docs/                   # User-facing documentation
 examples/               # Sample config + state
 packaging/              # PyInstaller specs (dev + release)
-scripts/                # Platform setup scripts
+scripts/                # Setup (bootstrap.py) and launcher scripts
 ```
 
 ## Running the tests

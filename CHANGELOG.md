@@ -141,6 +141,13 @@ All notable changes are recorded here. Format loosely follows
   removed in the next release.
 
 ### Fixed
+- #212 Installing the package (`pip install .`, `pip install -e ".[dev]"`,
+  `pip wheel .`) no longer runs the setup script. The build backend
+  executed the old root `setup.py`, which created a `venv`, installed
+  requirements, downloaded Playwright browsers and on Linux ran `sudo
+  apt-get`. The script is now `scripts/bootstrap.py` and runs only when
+  called: `python scripts/bootstrap.py` replaces `python setup.py`;
+  `scripts\windows\setup.bat` calls it as before.
 - #244 Only one MeManga process at a time changes a config directory, so
   a cron `check`, a manual command and the desktop app no longer overwrite
   each other's downloads, failed records, reading progress or imports.

@@ -56,14 +56,14 @@ Open **Command Prompt** or **PowerShell** and run:
 ```
 git clone https://github.com/meellm/MeManga.git
 cd MeManga
-python setup.py
+python scripts\bootstrap.py
 ```
 
 This creates a virtual environment, installs all dependencies, and downloads Chromium and Firefox browsers for Playwright scrapers.
 
 If `python` isn't recognized, try `py` instead:
 ```
-py setup.py
+py scripts\bootstrap.py
 ```
 
 Alternatively, use the provided batch script:
@@ -135,7 +135,7 @@ Open **Terminal** and run:
 ```bash
 git clone https://github.com/meellm/MeManga.git
 cd MeManga
-python3 setup.py
+python3 scripts/bootstrap.py
 ```
 
 This creates a virtual environment, installs all dependencies, and downloads Chromium and Firefox browsers for Playwright scrapers.
@@ -211,7 +211,7 @@ sudo pacman -S python python-pip git
 ```bash
 git clone https://github.com/meellm/MeManga.git
 cd MeManga
-python3 setup.py
+python3 scripts/bootstrap.py
 ```
 
 This creates a virtual environment, installs all dependencies, downloads Chromium and Firefox browsers, and installs Playwright system dependencies. On Debian/Ubuntu it also installs `xvfb` for headless browser support on servers without a display.
@@ -1432,14 +1432,14 @@ An exact title duplicate (ignoring case) is refused by `add` with exit code
 Python isn't in your PATH. Either:
 
 1. Reinstall Python from python.org and check **"Add Python to PATH"**
-2. Or use `py setup.py` and `py -m memanga` instead
+2. Or use `py scripts\bootstrap.py` and `py -m memanga` instead
 
 ### "Virtual environment not found"
 
 The `venv` folder is missing. Re-run setup:
 
 ```
-python setup.py
+python scripts\bootstrap.py
 ```
 
 Or:
